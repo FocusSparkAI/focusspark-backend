@@ -1,0 +1,190 @@
+from sqlmodel import Session, select
+from app.ai.features.quiz import quiz_feature
+from app.models.quiz_model import Quiz, QuizQuestion, QuizDifficulty
+from app.models.chat_model import MessageArtifact, ChatMessage, ChatThread
+
+
+DEFAULT_CHAT_QUIZ_DIFFICULTY = QuizDifficulty.BEGINNER
+
+
+def generate_quiz_ai(content: str, difficulty: QuizDifficulty):
+    return quiz_feature(content, difficulty)
+
+
+def _validate_quiz_questions(questions):
+    if isinstance(questions, dict):
+        for key in ("questions", "quiz", "items"):
+            maybe_questions = questions.get(key)
+            if isinstance(maybe_questions, list):
+                questions = maybe_questions
+                break
+
+    if not isinstance(questions, list):
+        raise ValueError("Invalid AI quiz payload")
+
+    normalized = []
+    for q in questions:
+        if not isinstance(q, dict):
+            raise ValueError("Invalid AI quiz item")
+
+        question_text = q.get("question")
+        options = q.get("options")
+        answer_index = q.get("correct_answer_index")
+
+        if not isinstance(question_text, str):
+            raise ValueError("Quiz item must include string 'question'")
+        if not isinstance(options, list) or not all(isinstance(opt, str) for opt in options):
+            raise ValueError("Quiz item must include string list 'options'")
+
+        # Normalize common AI aliases to canonical zero-based index.
+        if not isinstance(answer_index, int):
+            for alias in ("correctAnswerIndex", "answer_index", "answerIndex"):
+                alias_value = q.get(alias)
+                if isinstance(alias_value, int):
+                    answer_index = alias_value
+                    break
+
+        if not isinstance(answer_index, int):
+            answer_value = q.get("answer")
+            if isinstance(answer_value, int):
+                answer_index = answer_value
+            elif isinstance(answer_value, str):
+                normalized_options = [opt.strip().lower() for opt in options]
+                normalized_answer = answer_value.strip().lower()
+
+                if normalized_answer in normalized_options:
+                    answer_index = normalized_options.index(normalized_answer)
+                elif len(normalized_answer) == 1 and normalized_answer in "abcd":
+                    answer_index = ord(normalized_answer) - ord("a")
+
+        if not isinstance(answer_index, int):
+            raise ValueError("Quiz item must include int 'correct_answer_index'")
+        if answer_index < 0 or answer_index >= len(options):
+            raise ValueError("'correct_answer_index' is out of range for options")
+
+        normalized.append(
+            {
+                "question": question_text,
+                "options": options,
+                "correct_answer_index": answer_index,
+            }
+        )
+
+    return normalized
+
+
+# ✅ FROM TOPIC
+def create_quiz_from_topic(
+    topic: str,
+    user_id: int,
+    session: Session,
+    difficulty: QuizDifficulty,
+):
+    questions = _validate_quiz_questions(generate_quiz_ai(topic, difficulty))
+    quiz = Quiz(
+        user_id=user_id,
+        title=f"{topic} Quiz",
+        topic=topic,
+        difficulty=difficulty,
+        source="ai"
+    )
+    session.add(quiz)
+    session.commit()
+    session.refresh(quiz)
+
+    if quiz.id is None:
+        raise ValueError("Quiz was not persisted correctly")
+
+    created_questions = []
+    for position, q in enumerate(questions, start=1):
+        question = QuizQuestion(
+            quiz_id=quiz.id,
+            question=q["question"],
+            options=q["options"],
+            correct_answer_index=q["correct_answer_index"],
+            position=position,
+        )
+        session.add(question)
+
+    quiz.total_questions = len(questions)
+    session.add(quiz)
+    session.commit()
+    created_questions = session.exec(
+        select(QuizQuestion)
+        .where(QuizQuestion.quiz_id == quiz.id)
+        .order_by(QuizQuestion.position.asc(), QuizQuestion.id.asc())
+    ).all()
+    return {
+        "quiz": quiz.model_dump(mode="json"),
+        "questions": [
+            question.model_dump(mode="json")
+            for question in created_questions
+        ],
+    }
+
+
+# ✅ FROM CHAT
+def create_quiz_from_chat(message_id: int, user_id: int, session: Session):
+    message = session.get(ChatMessage, message_id)
+
+    if not message:
+        raise ValueError("Message not found")
+
+    thread = session.get(ChatThread, message.thread_id)
+    if not thread:
+        raise ValueError("Thread not found")
+    if thread.user_id != user_id:
+        raise PermissionError("You do not have access to this message")
+
+    questions = _validate_quiz_questions(
+        generate_quiz_ai(message.content, DEFAULT_CHAT_QUIZ_DIFFICULTY)
+    )
+    quiz = Quiz(
+        user_id=user_id,
+        title="Chat Quiz",
+        difficulty=DEFAULT_CHAT_QUIZ_DIFFICULTY,
+        source="chat",
+        created_from_message_id=message_id
+    )
+    session.add(quiz)
+    session.commit()
+    session.refresh(quiz)
+
+    if quiz.id is None:
+        raise ValueError("Quiz was not persisted correctly")
+
+    created_questions = []
+    for position, q in enumerate(questions, start=1):
+        question = QuizQuestion(
+            quiz_id=quiz.id,
+            question=q["question"],
+            options=q["options"],
+            correct_answer_index=q["correct_answer_index"],
+            position=position,
+        )
+        session.add(question)
+
+    quiz.total_questions = len(questions)
+    session.add(quiz)
+    session.commit()
+
+    # 🔥 LINK
+    artifact = MessageArtifact(
+        message_id=message_id,
+        artifact_type="quiz",
+        artifact_id=quiz.id
+    )
+    session.add(artifact)
+    session.commit()
+    created_questions = session.exec(
+        select(QuizQuestion)
+        .where(QuizQuestion.quiz_id == quiz.id)
+        .order_by(QuizQuestion.position.asc(), QuizQuestion.id.asc())
+    ).all()
+    return {
+        "quiz": quiz.model_dump(mode="json"),
+        "questions": [
+            question.model_dump(mode="json")
+            for question in created_questions
+        ],
+    }

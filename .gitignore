@@ -1,0 +1,67 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+
+# Unit test / coverage
+.coverage
+.coverage.*
+.pytest_cache/
+htmlcov/
+coverage.xml
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Environment variables
+.env
+.env.*
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# Logs and databases
+*.log
+logs/
+*.sqlite3
+*.db
+*.sqlite
+
+# Caches
+.mypy_cache/
+.cache/
+__pypackages__/
+
+# Jupyter
+.ipynb_checkpoints
+
+# macOS/Windows
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Compiled extensions
+*.so
+*.pyd
+
+# Misc
+*.pyc
+camera_roll/
