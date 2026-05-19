@@ -66,9 +66,17 @@ class Achievement(SQLModel, table=True):
     __tablename__ = "achievements"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    key: Optional[str] = Field(default=None, index=True, unique=True)
     title: str
     description: Optional[str] = None
     badge_icon: Optional[str] = None
+    criteria_type: Optional[str] = Field(default=None, index=True)
+    criteria_target: int = 1
+    criteria_window_days: Optional[int] = None
+    criteria_data: Optional[dict] = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -78,6 +86,7 @@ class UserAchievement(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
     achievement_id: int = Field(foreign_key="achievements.id")
+    achievement_title: Optional[str] = None
     unlocked_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -99,7 +108,28 @@ class UserSettings(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id", unique=True)
     dark_mode: bool = False
+    pomodoro_duration_minutes: int = 25
+    break_duration_minutes: int = 5
+    ai_persona: str = "supportive"
+    focus_sensitivity: str = "medium"
+    fallback_method: str = "manual"
     notifications_enabled: bool = True
     focus_alerts_enabled: bool = True
+    integrations: Optional[dict] = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+    appearance: Optional[dict] = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+    accessibility: Optional[dict] = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
+    privacy: Optional[dict] = Field(
+        default=None,
+        sa_column=Column(JSON, nullable=True),
+    )
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

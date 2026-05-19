@@ -15,6 +15,7 @@ from app.models.productivity_model import (
 )
 from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQuestion
 from app.models.user_model import User
+from sqlmodel import select
 
 assert DATABASE_URL is not None
 engine = create_engine(DATABASE_URL, echo=True)
@@ -68,4 +69,61 @@ def _ensure_mysql_chatmessage_content_text():
 
 def init_db():
     SQLModel.metadata.create_all(engine)
+    _seed_default_achievements()
     _ensure_mysql_chatmessage_content_text()
+
+
+def _seed_default_achievements():
+    defaults = [
+        {
+            "key": "first_session",
+            "title": "First Session",
+            "description": "Complete your first study session.",
+            "badge_icon": "spark",
+            "criteria_type": "sessions_completed",
+            "criteria_target": 1,
+        },
+        {
+            "key": "focus_builder",
+            "title": "Focus Builder",
+            "description": "Complete 5 study sessions.",
+            "badge_icon": "flame",
+            "criteria_type": "sessions_completed",
+            "criteria_target": 5,
+        },
+        {
+            "key": "deep_focus",
+            "title": "Deep Focus",
+            "description": "Reach 100 total focus minutes.",
+            "badge_icon": "clock",
+            "criteria_type": "focus_minutes",
+            "criteria_target": 100,
+        },
+        {
+            "key": "distraction_control",
+            "title": "Distraction Control",
+            "description": "Complete 30 distraction-free study sessions.",
+            "badge_icon": "shield",
+            "criteria_type": "distraction_free_sessions",
+            "criteria_target": 30,
+        },
+        {
+            "key": "streak_keeper",
+            "title": "Streak Keeper",
+            "description": "Reach a 7-day focus streak.",
+            "badge_icon": "calendar",
+            "criteria_type": "streak_days",
+            "criteria_target": 7,
+        },
+    ]
+
+    with Session(engine) as session:
+        existing_keys = set(session.exec(select(Achievement.key)).all())
+        added = False
+        for item in defaults:
+            if item["key"] in existing_keys:
+                continue
+            session.add(Achievement(**item))
+            added = True
+        if added:
+            session.commit()

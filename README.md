@@ -143,6 +143,29 @@ Authorization: Bearer <token>
 DELETE /auth/delete-user
 Authorization: Bearer <token>
 ```
+```
+
+---
+
+**Recent Backend Changes (2026-05-19)**
+
+- Added study history endpoint: `GET /study/sessions/history?start_date=&end_date=` returning raw `StudySession` rows for frontend graphs and heatmaps.
+- Added export endpoint: `GET /study/export?format=json|csv` — JSON returns sessions, achievements, settings; CSV returns session rows as an attachment.
+- Achievements expanded: achievements now include criteria metadata and the API returns computed `progress_current`/`progress_target` plus `unlocked`/`unlocked_at` for each user so the frontend can render progress bars without re-computing everything client-side.
+- User settings expanded with common frontend preferences (pomodoro durations, AI persona, focus sensitivity, fallback method, integrations, appearance, accessibility, privacy). Use `GET /study/settings` and `PUT /study/settings`.
+- Seeded a small set of default achievements on DB init to populate the frontend immediately.
+
+Notes on migrations:
+- If you already have a running database, `SQLModel.metadata.create_all(engine)` will not alter existing columns to add new fields. Please create and run a migration (Alembic or your preferred tool) to add the new columns to `achievements`, `user_achievements`, and `user_settings` tables before deploying.
+
+Frontend wiring:
+- The frontend currently uses local/mock data for achievements, reports and settings in several screens. To switch to the real backend, update the frontend to call the following routes and adapt field names as shown in `temp.md`:
+  - `/study/achievements` (returns progress_current/progress_target, unlocked, unlocked_at)
+  - `/study/sessions/history` (returns sessions by date range)
+  - `/study/export` (download JSON/CSV)
+  - `/study/settings` (get / put user preferences)
+
+If you want, I can next patch the frontend to consume these endpoints and map the fields to the UI components.
 **Response (200):**
 ```json
 {
