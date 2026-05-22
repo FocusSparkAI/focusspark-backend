@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, Text
 from sqlmodel import Field, SQLModel
 
 
@@ -10,7 +10,7 @@ class StudySession(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
-    session_type: str
+    session_type: str = Field(max_length=50)
     started_at: datetime = Field(default_factory=datetime.utcnow)
     ended_at: Optional[datetime] = None
     planned_duration_minutes: int
@@ -27,8 +27,8 @@ class DistractionEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
     session_id: int = Field(foreign_key="study_sessions.id")
-    event_type: str
-    source: str
+    event_type: str = Field(max_length=100)
+    source: str = Field(max_length=100)
     confidence_score: Optional[float] = None
     productive: Optional[bool] = None
     payload: Optional[dict] = Field(
@@ -44,7 +44,7 @@ class EmotionLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
     session_id: int = Field(foreign_key="study_sessions.id")
-    emotion: str
+    emotion: str = Field(max_length=100)
     confidence_score: Optional[float] = None
     detected_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -54,7 +54,7 @@ class StudyGoal(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
-    title: str
+    title: str = Field(max_length=255)
     target_minutes: int
     current_minutes: int = 0
     completed: bool = False
@@ -66,11 +66,11 @@ class Achievement(SQLModel, table=True):
     __tablename__ = "achievements"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    key: Optional[str] = Field(default=None, index=True, unique=True)
-    title: str
-    description: Optional[str] = None
-    badge_icon: Optional[str] = None
-    criteria_type: Optional[str] = Field(default=None, index=True)
+    key: Optional[str] = Field(default=None, index=True, unique=True, max_length=100)
+    title: str = Field(max_length=255)
+    description: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    badge_icon: Optional[str] = Field(default=None, max_length=100)
+    criteria_type: Optional[str] = Field(default=None, index=True, max_length=100)
     criteria_target: int = 1
     criteria_window_days: Optional[int] = None
     criteria_data: Optional[dict] = Field(
@@ -86,7 +86,7 @@ class UserAchievement(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
     achievement_id: int = Field(foreign_key="achievements.id")
-    achievement_title: Optional[str] = None
+    achievement_title: Optional[str] = Field(default=None, max_length=255)
     unlocked_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -95,9 +95,9 @@ class Notification(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
-    type: str
-    title: str
-    message: str
+    type: str = Field(max_length=50)
+    title: str = Field(max_length=255)
+    message: str = Field(sa_column=Column(Text, nullable=False))
     read: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -110,9 +110,9 @@ class UserSettings(SQLModel, table=True):
     dark_mode: bool = False
     pomodoro_duration_minutes: int = 25
     break_duration_minutes: int = 5
-    ai_persona: str = "supportive"
-    focus_sensitivity: str = "medium"
-    fallback_method: str = "manual"
+    ai_persona: str = Field(default="supportive", max_length=100)
+    focus_sensitivity: str = Field(default="medium", max_length=50)
+    fallback_method: str = Field(default="manual", max_length=50)
     notifications_enabled: bool = True
     focus_alerts_enabled: bool = True
     integrations: Optional[dict] = Field(

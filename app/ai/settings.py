@@ -15,6 +15,10 @@ class AISettings:
     openai_base_url = os.getenv(
         "GITHUB_MODELS_ENDPOINT", "https://models.inference.ai.azure.com"
     )
+    # Gemini / Google Generative AI settings
+    gemini_api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    # Model name to use for Gemini. Defaults to a flash model recommended for chat.
+    gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 settings = AISettings()

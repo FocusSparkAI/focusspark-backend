@@ -4,8 +4,8 @@ from app.models.flashcard_model import FlashcardDeck, Flashcard
 from app.models.chat_model import MessageArtifact, ChatMessage, ChatThread
 
 
-def generate_flashcards_ai(content: str):
-    return flashcard_feature(content)
+def generate_flashcards_ai(content: str, card_count: int | None = None):
+    return flashcard_feature(content, card_count)
 
 
 def _validate_flashcards(cards):
@@ -39,11 +39,41 @@ def _validate_flashcards(cards):
 
 
 # ✅ FROM TOPIC
-def create_flashcards_from_topic(topic: str, user_id: int, session: Session):
-    cards = _validate_flashcards(generate_flashcards_ai(topic))
+def _is_generic_thread_title(title: str | None) -> bool:
+    normalized = (title or "").strip().lower()
+    return normalized in {"", "focusspark ai tutor", "ai tutor", "chat", "new chat"}
+
+
+def _derive_topic(thread: ChatThread, message_content: str) -> str | None:
+    if thread.title and not _is_generic_thread_title(thread.title):
+        return thread.title.strip()[:255]
+
+    try:
+        from app.ai.engine import generate_text
+
+        prompt = (
+            "Provide a concise study topic (3-6 words) that summarizes the following message. "
+            "Return only the topic text with no extra explanation.\n\nMessage:\n" + message_content
+        )
+        resp = generate_text(prompt)
+        if resp:
+            topic = resp.strip().splitlines()[0].strip().strip('"\'')
+            if topic and not _is_generic_thread_title(topic):
+                return topic[:255]
+    except Exception:
+        pass
+
+    words = [word.strip(".,:;!?()[]{}\"'") for word in message_content.split()]
+    words = [word for word in words if len(word) > 2]
+    fallback = " ".join(words[:6]).strip()
+    return fallback[:255] if fallback else None
+
+
+def create_flashcards_from_topic(topic: str, user_id: int, session: Session, card_count: int | None = None):
+    cards = _validate_flashcards(generate_flashcards_ai(topic, card_count))
     deck = FlashcardDeck(
         user_id=user_id,
-        title=f"{topic} Flashcards",
+        title=topic,
         topic=topic,
         source="ai"
     )
@@ -91,9 +121,26 @@ def create_flashcards_from_chat(message_id: int, user_id: int, session: Session)
         raise PermissionError("You do not have access to this message")
 
     cards = _validate_flashcards(generate_flashcards_ai(message.content))
+
+    # Prefer topic supplied in message.payload when available.
+    derived_topic = None
+    try:
+        if isinstance(message.payload, dict):
+            for key in ("topic", "topics", "topic_label", "label"):
+                t = message.payload.get(key)
+                if isinstance(t, str) and t.strip():
+                    derived_topic = t.strip()
+                    break
+    except Exception:
+        derived_topic = None
+
+    if not derived_topic:
+        derived_topic = _derive_topic(thread, message.content)
+
     deck = FlashcardDeck(
         user_id=user_id,
-        title="Chat Flashcards",
+        title=derived_topic or "Chat Flashcards",
+        topic=derived_topic,
         source="chat",
         created_from_message_id=message_id
     )

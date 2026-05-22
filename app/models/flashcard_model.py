@@ -1,7 +1,7 @@
 from sqlmodel import SQLModel, Field
 from typing import List, Optional
 from datetime import datetime
-from sqlalchemy import Column, JSON, UniqueConstraint
+from sqlalchemy import Column, JSON, Text, UniqueConstraint
 
 
 class FlashcardDeck(SQLModel, table=True):
@@ -9,10 +9,10 @@ class FlashcardDeck(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
-    title: str
-    description: Optional[str] = None
-    topic: Optional[str] = None
-    source: str = "manual"  # ai / manual / chat
+    title: str = Field(max_length=255)
+    description: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    topic: Optional[str] = Field(default=None, max_length=255)
+    source: str = Field(default="manual", max_length=50)  # ai / manual / chat
     linked_document_id: Optional[int] = Field(default=None, foreign_key="documents.id")
     tags: List[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     total_cards: int = 0
@@ -28,13 +28,13 @@ class Flashcard(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     deck_id: int = Field(foreign_key="flashcard_decks.id")
-    title: Optional[str] = None
-    front: str
-    back: str
-    explanation: Optional[str] = None
-    example: Optional[str] = None
-    memory_tip: Optional[str] = None
-    difficulty: str = "medium"
+    title: Optional[str] = Field(default=None, max_length=255)
+    front: str = Field(sa_column=Column(Text, nullable=False))
+    back: str = Field(sa_column=Column(Text, nullable=False))
+    explanation: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    example: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    memory_tip: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    difficulty: str = Field(default="medium", max_length=50)
     tags: List[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     position: int = 0
     created_at: datetime = Field(default_factory=datetime.utcnow)

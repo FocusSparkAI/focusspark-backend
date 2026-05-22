@@ -28,7 +28,7 @@ FastAPI-based AI study assistant backend with real-time focus/emotion detection,
 Create `.env` in project root:
 
 ```env
-DATABASE_URL=mysql+pymysql://root:password@127.0.0.1:3306/focusspark
+DATABASE_URL=postgresql+psycopg2://postgres:password@127.0.0.1:5432/focusspark
 JWT_SECRET=your-32-character-secret-key-here
 AI_PROVIDER=openai
 GITHUB_MODEL=gpt-4.1
@@ -47,7 +47,7 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
-The document parsing packages are required for the upload feature.
+The main venv is intended for PostgreSQL. `requirements.txt` already includes the runtime packages used by the app, including `psycopg2-binary` for Postgres and `openai` for the AI provider.
 
 ### Running the Server
 
@@ -202,7 +202,8 @@ Authorization: Bearer <token>
 **Request:**
 ```json
 {
-  "title": "Data Structures Questions"
+  "title": "Data Structures Questions",
+  "ai_provider": "openai"
 }
 ```
 **Response (201):**
@@ -211,6 +212,8 @@ Authorization: Bearer <token>
   "id": 1,
   "user_id": 1,
   "title": "Data Structures Questions",
+  "ai_provider": "openai",
+  "ai_model": "gpt-4.1",
   "created_at": "2026-05-10T14:30:00"
 }
 ```
@@ -719,7 +722,6 @@ WebSocket expectations:
 On startup:
 
 - SQLModel metadata is created automatically.
-- For MySQL only, chatmessage.content is upgraded to TEXT if needed.
 
 ## Database Status
 

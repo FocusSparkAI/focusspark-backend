@@ -1,5 +1,6 @@
 import csv
 import io
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Optional
 
@@ -10,6 +11,8 @@ from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.db.database import get_session
+from app.models.chat_model import ChatMessage, ChatThread, Document, MessageArtifact
+from app.models.flashcard_model import Flashcard, FlashcardDeck, FlashcardReview
 from app.models.productivity_model import (
     Achievement,
     DistractionEvent,
@@ -20,6 +23,7 @@ from app.models.productivity_model import (
     UserAchievement,
     UserSettings,
 )
+from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQuestion
 from app.utils.auth import get_current_user
 
 
@@ -103,6 +107,8 @@ class AchievementResponse(BaseModel):
     achievement_title: Optional[str] = None
     progress_current: int
     progress_target: int
+    tier: str = "bronze"
+    reward: Optional[str] = None
 
 
 def _get_owned_session(session_id: int, user_id: int, db: Session) -> StudySession:
@@ -193,6 +199,33 @@ def _compute_achievement_progress(
         )
     elif metric in {"distraction_free_sessions", "zero_distraction_sessions"}:
         current = sum(1 for session in sessions if session.completed and (session.distraction_count or 0) == 0)
+    elif metric == "average_focus":
+        work_sessions = [session for session in sessions if session.completed and session.session_type == "work"]
+        current = (
+            round(
+                sum(
+                    100 if session.distraction_count == 0 else max(0, 100 - (session.distraction_count * 10))
+                    for session in work_sessions
+                )
+                / len(work_sessions)
+            )
+            if work_sessions
+            else 0
+        )
+    elif metric == "early_sessions":
+        current = sum(1 for session in sessions if session.started_at and session.started_at.hour < 7)
+    elif metric == "late_sessions":
+        current = sum(1 for session in sessions if session.started_at and session.started_at.hour == 0)
+    elif metric == "daily_sessions":
+        counts: dict[date, int] = {}
+        for session in sessions:
+            if not session.completed or not session.started_at:
+                continue
+            session_date = session.started_at.date()
+            counts[session_date] = counts.get(session_date, 0) + 1
+        current = max(counts.values(), default=0)
+    elif metric == "documents_uploaded":
+        current = 0
     elif metric in {"streak_days", "current_streak"}:
         current = int(getattr(user, "current_streak", 0) or 0)
     elif metric == "total_focus_minutes":
@@ -201,6 +234,177 @@ def _compute_achievement_progress(
         current = 0
 
     return current, target
+
+
+def _session_minutes(session: StudySession) -> int:
+    return int(session.actual_duration_minutes or session.planned_duration_minutes or 0)
+
+
+def _session_focus_score(session: StudySession) -> int:
+    if not session.completed or session.session_type != "work":
+        return 0
+    return 100 if (session.distraction_count or 0) == 0 else max(0, 100 - ((session.distraction_count or 0) * 10))
+
+
+def _current_streak_from_dates(study_dates: set[date]) -> int:
+    if not study_dates:
+        return 0
+
+    today = datetime.utcnow().date()
+    anchor = today if today in study_dates else today - timedelta(days=1)
+    streak = 0
+    cursor = anchor
+    while cursor in study_dates:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return streak
+
+
+def _longest_streak_from_dates(study_dates: set[date]) -> int:
+    if not study_dates:
+        return 0
+
+    longest = 0
+    current = 0
+    previous_day: Optional[date] = None
+    for study_day in sorted(study_dates):
+        if previous_day is not None and study_day == previous_day + timedelta(days=1):
+            current += 1
+        else:
+            current = 1
+        longest = max(longest, current)
+        previous_day = study_day
+    return longest
+
+
+def _recalculate_user_progress(user, db: Session) -> None:
+    sessions = db.exec(
+        select(StudySession).where(
+            StudySession.user_id == user.id,
+            StudySession.completed == True,  # noqa: E712
+            StudySession.session_type == "work",
+        )
+    ).all()
+
+    study_dates = {
+        session.started_at.date()
+        for session in sessions
+        if session.started_at is not None and _session_minutes(session) > 0
+    }
+
+    user.current_streak = _current_streak_from_dates(study_dates)
+    user.longest_streak = _longest_streak_from_dates(study_dates)
+    user.total_focus_minutes = sum(_session_minutes(session) for session in sessions)
+    user.updated_at = datetime.utcnow()
+    db.add(user)
+
+
+def _sessions_for_recent_days(user_id: int, db: Session, days: int) -> list[StudySession]:
+    start_date = datetime.combine(datetime.utcnow().date() - timedelta(days=days - 1), time.min)
+    return db.exec(
+        select(StudySession)
+        .where(StudySession.user_id == user_id, StudySession.started_at >= start_date)
+        .order_by(text("started_at ASC, id ASC"))
+    ).all()
+
+
+def _sessions_for_recent_weeks(user_id: int, db: Session, weeks: int) -> list[StudySession]:
+    start_date = datetime.combine(datetime.utcnow().date() - timedelta(days=(weeks * 7) - 1), time.min)
+    return db.exec(
+        select(StudySession)
+        .where(StudySession.user_id == user_id, StudySession.started_at >= start_date)
+        .order_by(text("started_at ASC, id ASC"))
+    ).all()
+
+
+def _daily_focus_rows(sessions: list[StudySession], days: int = 7) -> list[dict]:
+    today = datetime.utcnow().date()
+    buckets = {
+        today - timedelta(days=offset): {
+            "date": today - timedelta(days=offset),
+            "minutes": 0,
+            "sessions": 0,
+            "distractions": 0,
+            "focus_scores": [],
+        }
+        for offset in range(days - 1, -1, -1)
+    }
+
+    for session in sessions:
+        if not session.started_at:
+            continue
+        session_day = session.started_at.date()
+        if session_day not in buckets:
+            continue
+        buckets[session_day]["minutes"] += _session_minutes(session) if session.completed else 0
+        buckets[session_day]["sessions"] += 1 if session.completed else 0
+        buckets[session_day]["distractions"] += session.distraction_count or 0
+        if session.completed and session.session_type == "work":
+            buckets[session_day]["focus_scores"].append(_session_focus_score(session))
+
+    rows = []
+    for item in buckets.values():
+        scores = item.pop("focus_scores")
+        rows.append(
+            {
+                "date": item["date"].isoformat(),
+                "day": item["date"].strftime("%a"),
+                "minutes": item["minutes"],
+                "sessions": item["sessions"],
+                "distractions": item["distractions"],
+                "focus_score": round(sum(scores) / len(scores)) if scores else 0,
+            }
+        )
+    return rows
+
+
+def _weekly_consistency_rows(sessions: list[StudySession], weeks: int = 4) -> list[dict]:
+    today = datetime.utcnow().date()
+    rows = []
+    for index in range(weeks, 0, -1):
+        week_end = today - timedelta(days=(index - 1) * 7)
+        week_start = week_end - timedelta(days=6)
+        week_sessions = [
+            session
+            for session in sessions
+            if session.started_at and week_start <= session.started_at.date() <= week_end
+        ]
+        completed = [session for session in week_sessions if session.completed]
+        study_days = {session.started_at.date() for session in completed if session.started_at}
+        rows.append(
+            {
+                "week": f"Week {weeks - index + 1}",
+                "start_date": week_start.isoformat(),
+                "end_date": week_end.isoformat(),
+                "study_days": len(study_days),
+                "completed_sessions": len(completed),
+                "focus_minutes": sum(_session_minutes(session) for session in completed if session.session_type == "work"),
+            }
+        )
+    return rows
+
+
+def _best_study_window(sessions: list[StudySession]) -> Optional[dict]:
+    hourly_scores: dict[int, list[int]] = defaultdict(list)
+    for session in sessions:
+        if not session.started_at or not session.completed or session.session_type != "work":
+            continue
+        hourly_scores[session.started_at.hour].append(_session_focus_score(session))
+
+    if not hourly_scores:
+        return None
+
+    best_hour, scores = max(
+        hourly_scores.items(),
+        key=lambda item: (sum(item[1]) / len(item[1]), len(item[1])),
+    )
+    end_hour = (best_hour + 2) % 24
+    return {
+        "label": f"{best_hour:02d}:00-{end_hour:02d}:00",
+        "hour": best_hour,
+        "average_focus": round(sum(scores) / len(scores)),
+        "sessions": len(scores),
+    }
 
 
 def _serialize_achievement(
@@ -212,6 +416,7 @@ def _serialize_achievement(
     current, target = _compute_achievement_progress(achievement, user, db)
     unlocked = user_achievement is not None
 
+    criteria_data = achievement.criteria_data or {}
     return {
         "id": achievement.id,
         "key": achievement.key,
@@ -226,7 +431,33 @@ def _serialize_achievement(
         "achievement_title": user_achievement.achievement_title if user_achievement else None,
         "progress_current": current,
         "progress_target": target,
+        "tier": criteria_data.get("tier") or "bronze",
+        "reward": criteria_data.get("reward"),
     }
+
+
+def _ensure_earned_achievements(user, db: Session) -> None:
+    achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
+    existing = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
+    existing_ids = {item.achievement_id for item in existing}
+    changed = False
+
+    for achievement in achievements:
+        if achievement.id in existing_ids:
+            continue
+        current, target = _compute_achievement_progress(achievement, user, db)
+        if current >= target:
+            db.add(
+                UserAchievement(
+                    user_id=user.id,
+                    achievement_id=achievement.id,
+                    achievement_title=achievement.title,
+                )
+            )
+            changed = True
+
+    if changed:
+        db.commit()
 
 
 def _session_to_dict(session: StudySession) -> dict:
@@ -235,6 +466,102 @@ def _session_to_dict(session: StudySession) -> dict:
 
 def _settings_to_dict(settings: UserSettings) -> dict:
     return settings.model_dump(mode="json")
+
+
+def _delete_records(db: Session, records: list) -> int:
+    for record in records:
+        db.delete(record)
+    return len(records)
+
+
+@router.delete("/data")
+def clear_account_data(
+    db: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    deleted_counts = {}
+
+    quiz_attempts = db.exec(
+        select(QuizAttempt).where(QuizAttempt.user_id == user.id)
+    ).all()
+    attempt_ids = [attempt.id for attempt in quiz_attempts if attempt.id is not None]
+    quiz_attempt_answers = (
+        db.exec(
+            select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id.in_(attempt_ids))
+        ).all()
+        if attempt_ids
+        else []
+    )
+    quizzes = db.exec(select(Quiz).where(Quiz.user_id == user.id)).all()
+    quiz_ids = [quiz.id for quiz in quizzes if quiz.id is not None]
+    quiz_questions = (
+        db.exec(select(QuizQuestion).where(QuizQuestion.quiz_id.in_(quiz_ids))).all()
+        if quiz_ids
+        else []
+    )
+
+    flashcard_reviews = db.exec(
+        select(FlashcardReview).where(FlashcardReview.user_id == user.id)
+    ).all()
+    flashcard_decks = db.exec(
+        select(FlashcardDeck).where(FlashcardDeck.user_id == user.id)
+    ).all()
+    deck_ids = [deck.id for deck in flashcard_decks if deck.id is not None]
+    flashcards = (
+        db.exec(select(Flashcard).where(Flashcard.deck_id.in_(deck_ids))).all()
+        if deck_ids
+        else []
+    )
+
+    chat_threads = db.exec(
+        select(ChatThread).where(ChatThread.user_id == user.id)
+    ).all()
+    thread_ids = [thread.id for thread in chat_threads if thread.id is not None]
+    chat_messages = (
+        db.exec(select(ChatMessage).where(ChatMessage.thread_id.in_(thread_ids))).all()
+        if thread_ids
+        else []
+    )
+    message_ids = [message.id for message in chat_messages if message.id is not None]
+    message_artifacts = (
+        db.exec(
+            select(MessageArtifact).where(MessageArtifact.message_id.in_(message_ids))
+        ).all()
+        if message_ids
+        else []
+    )
+
+    delete_groups = [
+        ("quiz_attempt_answers", quiz_attempt_answers),
+        ("quiz_attempts", quiz_attempts),
+        ("quiz_questions", quiz_questions),
+        ("quizzes", quizzes),
+        ("flashcard_reviews", flashcard_reviews),
+        ("flashcards", flashcards),
+        ("flashcard_decks", flashcard_decks),
+        ("message_artifacts", message_artifacts),
+        ("chat_messages", chat_messages),
+        ("chat_threads", chat_threads),
+        ("documents", db.exec(select(Document).where(Document.user_id == user.id)).all()),
+        ("distraction_events", db.exec(select(DistractionEvent).where(DistractionEvent.user_id == user.id)).all()),
+        ("emotion_logs", db.exec(select(EmotionLog).where(EmotionLog.user_id == user.id)).all()),
+        ("study_sessions", db.exec(select(StudySession).where(StudySession.user_id == user.id)).all()),
+        ("study_goals", db.exec(select(StudyGoal).where(StudyGoal.user_id == user.id)).all()),
+        ("user_achievements", db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()),
+        ("notifications", db.exec(select(Notification).where(Notification.user_id == user.id)).all()),
+    ]
+
+    for name, records in delete_groups:
+        deleted_counts[name] = _delete_records(db, records)
+
+    user.current_streak = 0
+    user.longest_streak = 0
+    user.total_focus_minutes = 0
+    user.updated_at = datetime.utcnow()
+    db.add(user)
+    db.commit()
+
+    return {"message": "Account data cleared successfully", "deleted": deleted_counts}
 
 
 @router.post("/sessions")
@@ -274,6 +601,7 @@ def complete_study_session(
     study_session.completed = True
     if payload.notes is not None:
                 study_session.notes = payload.notes
+    _recalculate_user_progress(user, db)
     db.add(study_session)
     db.commit()
     db.refresh(study_session)
@@ -393,6 +721,110 @@ def productivity_summary(
         "total_work_minutes": total_work_minutes,
         "total_distractions": total_distractions,
         "average_focus": average_focus,
+        "current_streak": int(getattr(user, "current_streak", 0) or 0),
+        "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
+    }
+
+
+@router.get("/stats/analytics")
+def analytics_insights(
+    db: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    sessions = _sessions_for_recent_weeks(user.id, db, 4)
+    completed = [session for session in sessions if session.completed]
+    work_sessions = [session for session in completed if session.session_type == "work"]
+    daily_focus = _daily_focus_rows(_sessions_for_recent_days(user.id, db, 7), 7)
+    weekly_consistency = _weekly_consistency_rows(sessions, 4)
+
+    best_day = max(daily_focus, key=lambda item: (item["minutes"], item["focus_score"]), default=None)
+    best_window = _best_study_window(work_sessions)
+    total_minutes = sum(_session_minutes(session) for session in work_sessions)
+    total_distractions = sum(session.distraction_count or 0 for session in completed)
+    average_focus = (
+        round(sum(_session_focus_score(session) for session in work_sessions) / len(work_sessions))
+        if work_sessions
+        else 0
+    )
+
+    return {
+        "total_focus_minutes": total_minutes,
+        "completed_sessions": len(completed),
+        "total_distractions": total_distractions,
+        "average_focus": average_focus,
+        "current_streak": int(getattr(user, "current_streak", 0) or 0),
+        "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
+        "daily_focus": daily_focus,
+        "weekly_consistency": weekly_consistency,
+        "best_focus_day": best_day,
+        "best_study_window": best_window,
+        "insights": [
+            {
+                "title": "Best focus day",
+                "value": best_day["day"] if best_day and best_day["minutes"] else None,
+                "detail": (
+                    f"{best_day['minutes']} focused minutes with {best_day['distractions']} distractions"
+                    if best_day and best_day["minutes"]
+                    else "Complete more sessions to discover your best day"
+                ),
+            },
+            {
+                "title": "Best study window",
+                "value": best_window["label"] if best_window else None,
+                "detail": (
+                    f"{best_window['average_focus']}% average focus across {best_window['sessions']} sessions"
+                    if best_window
+                    else "Complete more sessions to discover your best time"
+                ),
+            },
+            {
+                "title": "Consistency",
+                "value": f"{getattr(user, 'current_streak', 0) or 0} days",
+                "detail": "Current study streak",
+            },
+        ],
+    }
+
+
+@router.get("/stats/dashboard")
+def dashboard_stats(
+    db: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    sessions = _sessions_for_recent_days(user.id, db, 7)
+    completed = [session for session in sessions if session.completed]
+    work_sessions = [session for session in completed if session.session_type == "work"]
+    weekly_focus_minutes = sum(_session_minutes(session) for session in work_sessions)
+    average_focus = (
+        round(sum(_session_focus_score(session) for session in work_sessions) / len(work_sessions))
+        if work_sessions
+        else 0
+    )
+
+    _ensure_earned_achievements(user, db)
+    achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
+    unlocked = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
+
+    recent_activity = [
+        {
+            "label": f"Completed {session.session_type} session",
+            "time": session.ended_at or session.started_at,
+            "type": "session_completed",
+        }
+        for session in sorted(completed, key=lambda item: item.ended_at or item.started_at, reverse=True)[:5]
+    ]
+
+    return {
+        "weekly_focus_minutes": weekly_focus_minutes,
+        "weekly_focus_hours": round(weekly_focus_minutes / 60, 1),
+        "focus_score": average_focus,
+        "current_streak": int(getattr(user, "current_streak", 0) or 0),
+        "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
+        "badges_earned": len(unlocked),
+        "total_badges": len(achievements),
+        "completed_sessions_this_week": len(completed),
+        "daily_focus": _daily_focus_rows(sessions, 7),
+        "recent_activity": recent_activity,
     }
 
 
@@ -479,6 +911,7 @@ def list_achievements(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
+    _ensure_earned_achievements(user, db)
     achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
     unlocked = db.exec(
         select(UserAchievement).where(UserAchievement.user_id == user.id)
@@ -495,6 +928,7 @@ def list_unlocked_achievements(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
+    _ensure_earned_achievements(user, db)
     achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
     achievements_by_id = {achievement.id: achievement for achievement in achievements}
     unlocked = db.exec(

@@ -1,53 +1,25 @@
-from openai import OpenAI
 from app.ai.settings import settings
-import time
+
+from app.ai.providers.openai_provider import OpenAIProvider
+from app.ai.providers.gemini_provider import GeminiProvider
 
 
-class AIProvider:
-
-    def __init__(self):
-        if settings.provider != "openai":
-            raise ValueError("Currently only OpenAI supported")
-
-        if not settings.openai_api_key:
-            raise ValueError("GITHUB_TOKEN not set")
-
-        base_url = settings.openai_base_url
-
-        if base_url:
-            self.client = OpenAI(
-                api_key=settings.openai_api_key,
-                base_url=base_url,
-            )
-        else:
-            self.client = OpenAI(api_key=settings.openai_api_key)
-
-    def generate(self, prompt: str) -> str:
-        last_error = None
-
-        for _ in range(3):  # retry logic
-            try:
-                response = self.client.chat.completions.create(
-                    model=settings.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=settings.temperature,
-                    max_tokens=settings.max_tokens,
-                )
-                content = response.choices[0].message.content
-                if not content:
-                    raise Exception("AI returned empty content")
-                return content
-
-            except Exception as e:
-                last_error = e
-                time.sleep(1)
-
-        if last_error is None:
-            raise Exception("AI request failed after retries")
-
-        raise Exception(
-            f"AI request failed after retries ({type(last_error).__name__}): {last_error}"
-        )
+def _build_provider(name: str | None = None, model: str | None = None):
+    name = (name or settings.provider or "").lower()
+    if name == "openai" or not name:
+        return OpenAIProvider(model=model)
+    if name == "gemini":
+        return GeminiProvider(model=model)
+    raise ValueError(f"AI provider '{name}' not supported")
 
 
-provider = AIProvider()
+# Default provider instance for compatibility (uses env/defaults)
+provider = _build_provider(None, None)
+
+
+def get_provider(name: str | None = None, model: str | None = None):
+    """Return a provider instance for the given provider name and optional model.
+
+    If `model` is None, providers will fall back to their configured defaults.
+    """
+    return _build_provider(name, model)

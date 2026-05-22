@@ -1,5 +1,5 @@
 from sqlmodel import SQLModel, create_engine, Session
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from app.core.config import DATABASE_URL
 from app.models.chat_model import ChatMessage, ChatThread, Document, MessageArtifact
 from app.models.flashcard_model import Flashcard, FlashcardDeck, FlashcardReview
@@ -25,95 +25,144 @@ def get_session():
         yield session
 
 
-def _ensure_mysql_chatmessage_content_text():
-    # Existing tables created earlier may still have VARCHAR content columns.
-    if engine.dialect.name != "mysql":
+def init_db():
+    SQLModel.metadata.create_all(engine)
+    _ensure_user_profile_columns()
+    _seed_default_achievements()
+
+
+def _ensure_user_profile_columns():
+    inspector = inspect(engine)
+    if not inspector.has_table("users"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("users")}
+    timestamp_type = "TIMESTAMP" if engine.dialect.name == "postgresql" else "DATETIME"
+    additions = []
+    if "bio" not in existing:
+        additions.append(("bio", "TEXT NULL"))
+    if "avatar_url" not in existing:
+        additions.append(("avatar_url", "VARCHAR(1024) NULL"))
+    if "updated_at" not in existing:
+        additions.append(("updated_at", f"{timestamp_type} NULL"))
+
+    if not additions:
         return
 
     with engine.begin() as connection:
-        table_name = connection.execute(
-            text(
-                """
-                SELECT TABLE_NAME
-                FROM INFORMATION_SCHEMA.TABLES
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME IN ('chat_messages', 'chatmessage')
-                ORDER BY CASE TABLE_NAME WHEN 'chat_messages' THEN 0 ELSE 1 END
-                LIMIT 1
-                """
-            )
-        ).scalar()
-
-        if not table_name:
-            return
-
-        column_type = connection.execute(
-            text(
-                """
-                SELECT DATA_TYPE
-                FROM INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME = :table_name
-                  AND COLUMN_NAME = 'content'
-                """
-            ),
-            {"table_name": table_name},
-        ).scalar()
-
-        if str(column_type).lower() == "text":
-            return
-
-        connection.execute(
-            text(f"ALTER TABLE {table_name} MODIFY COLUMN content TEXT NOT NULL")
-        )
-
-def init_db():
-    SQLModel.metadata.create_all(engine)
-    _seed_default_achievements()
-    _ensure_mysql_chatmessage_content_text()
+        for column_name, definition in additions:
+            connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {definition}"))
 
 
 def _seed_default_achievements():
     defaults = [
         {
             "key": "first_session",
-            "title": "First Session",
+            "title": "First Step",
             "description": "Complete your first study session.",
-            "badge_icon": "spark",
+            "badge_icon": "clock",
             "criteria_type": "sessions_completed",
             "criteria_target": 1,
+            "criteria_data": {"tier": "bronze", "reward": "Blue timer theme unlocked"},
         },
         {
-            "key": "focus_builder",
-            "title": "Focus Builder",
-            "description": "Complete 5 study sessions.",
+            "key": "streak_starter",
+            "title": "Streak Starter",
+            "description": "Maintain a 7-day study streak.",
             "badge_icon": "flame",
-            "criteria_type": "sessions_completed",
-            "criteria_target": 5,
-        },
-        {
-            "key": "deep_focus",
-            "title": "Deep Focus",
-            "description": "Reach 100 total focus minutes.",
-            "badge_icon": "clock",
-            "criteria_type": "focus_minutes",
-            "criteria_target": 100,
-        },
-        {
-            "key": "distraction_control",
-            "title": "Distraction Control",
-            "description": "Complete 30 distraction-free study sessions.",
-            "badge_icon": "shield",
-            "criteria_type": "distraction_free_sessions",
-            "criteria_target": 30,
-        },
-        {
-            "key": "streak_keeper",
-            "title": "Streak Keeper",
-            "description": "Reach a 7-day focus streak.",
-            "badge_icon": "calendar",
             "criteria_type": "streak_days",
             "criteria_target": 7,
+            "criteria_data": {"tier": "silver", "reward": "Fire avatar border"},
+        },
+        {
+            "key": "focus_master",
+            "title": "Focus Master",
+            "description": "Complete a session with 100% focus.",
+            "badge_icon": "trophy",
+            "criteria_type": "distraction_free_sessions",
+            "criteria_target": 1,
+            "criteria_data": {"tier": "gold"},
+        },
+        {
+            "key": "session_collector",
+            "title": "Session Collector",
+            "description": "Complete 100 focused study blocks.",
+            "badge_icon": "brain",
+            "criteria_type": "work_sessions_completed",
+            "criteria_target": 100,
+            "criteria_data": {"tier": "silver", "reward": "Purple gradient theme"},
+        },
+        {
+            "key": "focus_champion",
+            "title": "Focus Champion",
+            "description": "Reach 95% average focus.",
+            "badge_icon": "target",
+            "criteria_type": "average_focus",
+            "criteria_target": 95,
+            "criteria_data": {"tier": "gold"},
+        },
+        {
+            "key": "early_bird",
+            "title": "Early Bird",
+            "description": "Start a study session before 7 AM.",
+            "badge_icon": "zap",
+            "criteria_type": "early_sessions",
+            "criteria_target": 1,
+            "criteria_data": {"tier": "bronze"},
+        },
+        {
+            "key": "night_owl",
+            "title": "Night Owl",
+            "description": "Study after midnight.",
+            "badge_icon": "star",
+            "criteria_type": "late_sessions",
+            "criteria_target": 1,
+            "criteria_data": {"tier": "bronze"},
+        },
+        {
+            "key": "marathon_runner",
+            "title": "Marathon Runner",
+            "description": "Complete 10 study sessions in one day.",
+            "badge_icon": "trending-up",
+            "criteria_type": "daily_sessions",
+            "criteria_target": 10,
+            "criteria_data": {"tier": "gold"},
+        },
+        {
+            "key": "knowledge_seeker",
+            "title": "Knowledge Seeker",
+            "description": "Upload 50 study documents.",
+            "badge_icon": "book-open",
+            "criteria_type": "documents_uploaded",
+            "criteria_target": 50,
+            "criteria_data": {"tier": "silver"},
+        },
+        {
+            "key": "consistency_king",
+            "title": "Consistency King",
+            "description": "Maintain a 30-day streak.",
+            "badge_icon": "calendar",
+            "criteria_type": "streak_days",
+            "criteria_target": 30,
+            "criteria_data": {"tier": "platinum", "reward": "Crown avatar icon"},
+        },
+        {
+            "key": "perfect_score",
+            "title": "Perfect Score",
+            "description": "Complete 10 distraction-free sessions.",
+            "badge_icon": "award",
+            "criteria_type": "distraction_free_sessions",
+            "criteria_target": 10,
+            "criteria_data": {"tier": "platinum"},
+        },
+        {
+            "key": "momentum_builder",
+            "title": "Momentum Builder",
+            "description": "Complete a focus block in every planned slot.",
+            "badge_icon": "zap",
+            "criteria_type": "sessions_completed",
+            "criteria_target": 12,
+            "criteria_data": {"tier": "gold"},
         },
     ]
 

@@ -1,7 +1,7 @@
 from sqlmodel import SQLModel, Field
 from typing import Optional
 from datetime import datetime
-from sqlalchemy import Column, JSON, Text
+from sqlalchemy import Column, JSON, String, Text
 
 
 class ChatThread(SQLModel, table=True):
@@ -9,8 +9,9 @@ class ChatThread(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
-    title: Optional[str] = None
-    persona: str = "sensei"
+    title: Optional[str] = Field(default=None, max_length=255)
+    ai_provider: str = Field(default="openai", max_length=50)
+    ai_model: Optional[str] = Field(default=None, max_length=255)
     pinned: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -21,7 +22,7 @@ class ChatMessage(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     thread_id: int = Field(foreign_key="chat_threads.id")
-    type: str  # user / ai / flashcard / quiz
+    type: str = Field(max_length=50)  # user / ai / flashcard / quiz
     content: str = Field(sa_column=Column(Text, nullable=False))
     payload: Optional[dict] = Field(
         default=None,
@@ -34,7 +35,7 @@ class MessageArtifact(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     message_id: int = Field(foreign_key="chat_messages.id")
-    artifact_type: str  # deck / quiz
+    artifact_type: str = Field(max_length=50)  # deck / quiz
     artifact_id: int
 
 class Document(SQLModel, table=True):
@@ -42,12 +43,12 @@ class Document(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="users.id")
-    name: str
-    file_type: str
+    name: str = Field(max_length=255)
+    file_type: str = Field(max_length=100)
     file_size: Optional[int] = None
-    storage_path: str
-    extracted_text: Optional[str] = None
+    storage_path: str = Field(max_length=1024)
+    extracted_text: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     processed: bool = False
-    uploaded_from: str
+    uploaded_from: str = Field(max_length=100)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

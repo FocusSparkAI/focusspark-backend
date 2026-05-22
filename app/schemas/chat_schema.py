@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from typing import Literal
 
 
 class ChatRequest(BaseModel):
@@ -7,7 +8,8 @@ class ChatRequest(BaseModel):
 
 
 class CreateThreadRequest(BaseModel):
-    title: str = "Test Thread"
+    title: str | None = None
+    ai_provider: Literal["openai", "gemini"] = "openai"
 
 
 class ChatResponse(BaseModel):

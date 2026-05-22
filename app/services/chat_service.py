@@ -90,16 +90,44 @@ def extract_document_text(file_name: str, content_type: str | None, file_bytes: 
     return cleaned_text
 
 
-def generate_chat_response(message: str):
-    return chat_feature(message)
+def generate_chat_response(message: str, provider_name: str | None = None):
+    return chat_feature(message, provider_name=provider_name)
 
 
-def generate_document_chat_response(message: str, document_text: str, document_name: str | None = None):
-    return chat_feature(message, document_text=document_text, document_name=document_name)
+def generate_document_chat_response(message: str, document_text: str, document_name: str | None = None,
+                                    provider_name: str | None = None):
+    return chat_feature(message, document_text=document_text, document_name=document_name,
+                        provider_name=provider_name)
 
 
-def create_thread(title: str, user_id: int, session: Session):
-    thread = ChatThread(user_id=user_id, title=title)
+def _resolve_model_for_provider(provider: str) -> str:
+    normalized_provider = provider.strip().lower()
+    from app.ai.settings import settings
+
+    if normalized_provider == "gemini":
+        return settings.gemini_model
+
+    return settings.model
+
+
+def create_thread(
+    title: str | None,
+    user_id: int,
+    session: Session,
+    ai_provider: str = "openai",
+):
+    normalized_provider = (ai_provider or "openai").strip().lower()
+    if normalized_provider not in {"openai", "gemini"}:
+        normalized_provider = "openai"
+
+    normalized_model = _resolve_model_for_provider(normalized_provider)
+
+    thread = ChatThread(
+        user_id=user_id,
+        title=title,
+        ai_provider=normalized_provider,
+        ai_model=normalized_model,
+    )
     session.add(thread)
     session.commit()
     session.refresh(thread)
@@ -113,7 +141,7 @@ def handle_chat(message: str, thread_id: int, user_id: int, session: Session):
     if thread.user_id != user_id:
         raise PermissionError("You do not have access to this thread")
 
-    ai_response = generate_chat_response(message)
+    ai_response = generate_chat_response(message, provider_name=thread.ai_provider)
     chat = ChatMessage(
         thread_id=thread_id,
         type="user",
@@ -149,7 +177,8 @@ def handle_document_chat(
         raise PermissionError("You do not have access to this thread")
 
     document_text = extract_document_text(file_name, content_type, file_bytes)
-    ai_response = generate_document_chat_response(message, document_text=document_text, document_name=file_name)
+    ai_response = generate_document_chat_response(message, document_text=document_text, document_name=file_name,
+                                                 provider_name=thread.ai_provider)
 
     user_prompt = message.strip() or "Explain the uploaded document."
     user_message = ChatMessage(

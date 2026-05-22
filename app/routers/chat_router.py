@@ -3,11 +3,77 @@ from sqlmodel import Session
 from app.db.database import get_session
 from sqlmodel import select
 from app.models.chat_model import ChatThread, ChatMessage, MessageArtifact
+from app.models.flashcard_model import FlashcardDeck, Flashcard
+from app.models.quiz_model import Quiz, QuizQuestion
 from app.schemas.chat_schema import ChatRequest, CreateThreadRequest
 from app.services.chat_service import handle_chat, handle_document_chat, create_thread
 from app.utils.auth import get_current_user
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
+
+
+def _hydrate_artifact(artifact: MessageArtifact, user_id: int, session: Session):
+    base = {
+        "id": artifact.id,
+        "artifact_type": artifact.artifact_type,
+        "artifact_id": artifact.artifact_id,
+    }
+
+    if artifact.artifact_type == "deck":
+        deck = session.exec(
+            select(FlashcardDeck).where(
+                FlashcardDeck.id == artifact.artifact_id,
+                FlashcardDeck.user_id == user_id,
+            )
+        ).first()
+        if not deck:
+            return None
+
+        cards = session.exec(
+            select(Flashcard)
+            .where(Flashcard.deck_id == deck.id)
+            .order_by(Flashcard.position.asc(), Flashcard.id.asc())
+        ).all()
+        return {
+            **base,
+            "deck_id": deck.id,
+            "title": deck.title,
+            "topic": deck.topic,
+            "source": deck.source,
+            "total_cards": deck.total_cards or len(cards),
+            "created_from_message_id": deck.created_from_message_id,
+            "cards": [card.model_dump(mode="json") for card in cards],
+            "flashcards": [card.model_dump(mode="json") for card in cards],
+        }
+
+    if artifact.artifact_type == "quiz":
+        quiz = session.exec(
+            select(Quiz).where(
+                Quiz.id == artifact.artifact_id,
+                Quiz.user_id == user_id,
+            )
+        ).first()
+        if not quiz:
+            return None
+
+        questions = session.exec(
+            select(QuizQuestion)
+            .where(QuizQuestion.quiz_id == quiz.id)
+            .order_by(QuizQuestion.position.asc(), QuizQuestion.id.asc())
+        ).all()
+        return {
+            **base,
+            "quiz_id": quiz.id,
+            "title": quiz.title,
+            "topic": quiz.topic,
+            "source": quiz.source,
+            "difficulty": quiz.difficulty,
+            "total_questions": quiz.total_questions or len(questions),
+            "created_from_message_id": quiz.created_from_message_id,
+            "questions": [question.model_dump(mode="json") for question in questions],
+        }
+
+    return base
 
 
 @router.get("/threads")
@@ -28,7 +94,12 @@ def create_chat_thread(
     session: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    thread = create_thread(data.title.strip() or "Test Thread", user.id, session)
+    thread = create_thread(
+        data.title.strip() if data.title else None,
+        user.id,
+        session,
+        ai_provider=data.ai_provider,
+    )
     return thread
 
 
@@ -68,7 +139,14 @@ def get_artifacts(
     if not thread or thread.user_id != user.id:
         raise HTTPException(status_code=404, detail="Message not found")
 
-    return session.exec(select(MessageArtifact).where(MessageArtifact.message_id == message_id)).all()
+    artifacts = session.exec(
+        select(MessageArtifact).where(MessageArtifact.message_id == message_id)
+    ).all()
+    return [
+        hydrated
+        for artifact in artifacts
+        if (hydrated := _hydrate_artifact(artifact, user.id, session)) is not None
+    ]
 
 
 @router.post("/")

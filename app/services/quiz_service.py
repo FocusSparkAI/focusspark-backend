@@ -30,11 +30,14 @@ def _validate_quiz_questions(questions):
         question_text = q.get("question")
         options = q.get("options")
         answer_index = q.get("correct_answer_index")
+        explanation = q.get("explanation")
 
         if not isinstance(question_text, str):
             raise ValueError("Quiz item must include string 'question'")
         if not isinstance(options, list) or not all(isinstance(opt, str) for opt in options):
             raise ValueError("Quiz item must include string list 'options'")
+        if explanation is not None and not isinstance(explanation, str):
+            explanation = None
 
         # Normalize common AI aliases to canonical zero-based index.
         if not isinstance(answer_index, int):
@@ -67,6 +70,7 @@ def _validate_quiz_questions(questions):
                 "question": question_text,
                 "options": options,
                 "correct_answer_index": answer_index,
+                "explanation": explanation.strip() if explanation else None,
             }
         )
 
@@ -74,6 +78,36 @@ def _validate_quiz_questions(questions):
 
 
 # ✅ FROM TOPIC
+def _is_generic_thread_title(title: str | None) -> bool:
+    normalized = (title or "").strip().lower()
+    return normalized in {"", "focusspark ai tutor", "ai tutor", "chat", "new chat"}
+
+
+def _derive_topic(thread: ChatThread, message_content: str) -> str | None:
+    if thread.title and not _is_generic_thread_title(thread.title):
+        return thread.title.strip()[:255]
+
+    try:
+        from app.ai.engine import generate_text
+
+        prompt = (
+            "Provide a concise study topic (3-6 words) that summarizes the following message. "
+            "Return only the topic text with no extra explanation.\n\nMessage:\n" + message_content
+        )
+        resp = generate_text(prompt)
+        if resp:
+            topic = resp.strip().splitlines()[0].strip().strip('"\'')
+            if topic and not _is_generic_thread_title(topic):
+                return topic[:255]
+    except Exception:
+        pass
+
+    words = [word.strip(".,:;!?()[]{}\"'") for word in message_content.split()]
+    words = [word for word in words if len(word) > 2]
+    fallback = " ".join(words[:6]).strip()
+    return fallback[:255] if fallback else None
+
+
 def create_quiz_from_topic(
     topic: str,
     user_id: int,
@@ -83,7 +117,7 @@ def create_quiz_from_topic(
     questions = _validate_quiz_questions(generate_quiz_ai(topic, difficulty))
     quiz = Quiz(
         user_id=user_id,
-        title=f"{topic} Quiz",
+        title=topic,
         topic=topic,
         difficulty=difficulty,
         source="ai"
@@ -102,6 +136,7 @@ def create_quiz_from_topic(
             question=q["question"],
             options=q["options"],
             correct_answer_index=q["correct_answer_index"],
+            explanation=q.get("explanation"),
             position=position,
         )
         session.add(question)
@@ -139,9 +174,27 @@ def create_quiz_from_chat(message_id: int, user_id: int, session: Session):
     questions = _validate_quiz_questions(
         generate_quiz_ai(message.content, DEFAULT_CHAT_QUIZ_DIFFICULTY)
     )
+
+    # Prefer topic already present in message.payload if provided by the client.
+    derived_topic = None
+    try:
+        if isinstance(message.payload, dict):
+            for key in ("topic", "topics", "topic_label", "label"):
+                t = message.payload.get(key)
+                if isinstance(t, str) and t.strip():
+                    derived_topic = t.strip()
+                    break
+    except Exception:
+        derived_topic = None
+
+    # Otherwise fall back to thread title or AI-assisted extraction.
+    if not derived_topic:
+        derived_topic = _derive_topic(thread, message.content)
+
     quiz = Quiz(
         user_id=user_id,
-        title="Chat Quiz",
+        title=derived_topic or "Chat Quiz",
+        topic=derived_topic,
         difficulty=DEFAULT_CHAT_QUIZ_DIFFICULTY,
         source="chat",
         created_from_message_id=message_id
@@ -160,6 +213,8 @@ def create_quiz_from_chat(message_id: int, user_id: int, session: Session):
             question=q["question"],
             options=q["options"],
             correct_answer_index=q["correct_answer_index"],
+            explanation=q.get("explanation"),
+            topic=derived_topic,
             position=position,
         )
         session.add(question)

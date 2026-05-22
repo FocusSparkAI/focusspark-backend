@@ -1,4 +1,5 @@
 from pydantic import BaseModel
+from pydantic import Field
 from typing import List, Optional
 from datetime import datetime
 
@@ -36,6 +37,7 @@ class FlashcardBundleResponse(BaseModel):
 
 class FlashcardGenerate(BaseModel):
     topic: str
+    card_count: Optional[int] = Field(default=None, ge=1, le=50)
 
 
 class FlashcardFromChat(BaseModel):

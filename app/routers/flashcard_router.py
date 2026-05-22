@@ -50,6 +50,19 @@ def get_all_decks(
     ).all()
 
 
+@router.get("/reviews")
+def get_flashcard_reviews(
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    reviews = session.exec(
+        select(FlashcardReview)
+        .where(FlashcardReview.user_id == user.id)
+        .order_by(text("next_review_at ASC, id DESC"))
+    ).all()
+    return [review.model_dump(mode="json") for review in reviews]
+
+
 @router.get("/{deck_id}")
 def get_flashcards(
     deck_id: int,
@@ -75,7 +88,7 @@ def generate_flashcards(data: FlashcardGenerate,
                         session: Session = Depends(get_session),
                         user=Depends(get_current_user)):
     try:
-        return create_flashcards_from_topic(data.topic, user.id, session)
+        return create_flashcards_from_topic(data.topic, user.id, session, data.card_count)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -94,19 +107,6 @@ def flashcards_from_chat(data: FlashcardFromChat,
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"AI provider error: {e}")
-
-
-@router.get("/reviews")
-def get_flashcard_reviews(
-    session: Session = Depends(get_session),
-    user=Depends(get_current_user),
-):
-    reviews = session.exec(
-        select(FlashcardReview)
-        .where(FlashcardReview.user_id == user.id)
-        .order_by(text("next_review_at ASC, id DESC"))
-    ).all()
-    return [review.model_dump(mode="json") for review in reviews]
 
 
 @router.put("/{flashcard_id}/review")

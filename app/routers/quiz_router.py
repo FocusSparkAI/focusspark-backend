@@ -42,6 +42,15 @@ def _get_owned_quiz(quiz_id: int, user_id: int, session: Session) -> Quiz:
     return quiz
 
 
+def _get_owned_quiz_questions(quiz_id: int, user_id: int, session: Session):
+    _get_owned_quiz(quiz_id, user_id, session)
+    return session.exec(
+        select(QuizQuestion)
+        .where(QuizQuestion.quiz_id == quiz_id)
+        .order_by(QuizQuestion.position.asc(), QuizQuestion.id.asc())
+    ).all()
+
+
 @router.get("/")
 def get_all_quizzes(
     session: Session = Depends(get_session),
@@ -57,18 +66,25 @@ def get_quiz_questions(
     session: Session = Depends(get_session),
     user=Depends(get_current_user)
 ):
-    quiz = session.exec(
-        select(Quiz).where(
-            Quiz.id == quiz_id,
-            Quiz.user_id == user.id,
-        )
-    ).first()
-    if not quiz:
-        raise HTTPException(status_code=404, detail="Quiz not found")
+    return _get_owned_quiz_questions(quiz_id, user.id, session)
 
-    return session.exec(
-        select(QuizQuestion).where(QuizQuestion.quiz_id == quiz_id)
-    ).all()
+
+@router.get("/{quiz_id}/questions")
+def get_quiz_questions_alias(
+    quiz_id: int,
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    return _get_owned_quiz_questions(quiz_id, user.id, session)
+
+
+@router.get("/{quiz_id}/items")
+def get_quiz_items_alias(
+    quiz_id: int,
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    return _get_owned_quiz_questions(quiz_id, user.id, session)
 
 
 @router.post("/generate", response_model=QuizBundleResponse)
