@@ -1,9 +1,15 @@
 import json
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from app.ai.features.focus_emotion import DetectionSmoother, analyze_frame, decode_base64_image
+from app.ai.features.focus_emotion import (
+    DetectionSmoother,
+    EMOTION_INTERVAL_SECONDS,
+    analyze_frame,
+    decode_base64_image,
+)
 
 
 router = APIRouter(tags=["Focus"])
@@ -34,6 +40,8 @@ def analyze_focus_frame(payload: FocusFrameRequest):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     smoother = DetectionSmoother(window_size=7)
+    last_emotion = "Neutral"
+    last_emotion_at = 0.0
 
     try:
         while True:
@@ -49,7 +57,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps(_build_invalid_image_response()))
                 continue
 
-            result = analyze_frame(img)
+            now = time.monotonic()
+            should_detect_emotion = (
+                last_emotion_at == 0.0
+                or (now - last_emotion_at) >= EMOTION_INTERVAL_SECONDS
+            )
+
+            result = analyze_frame(
+                img,
+                detect_emotion=should_detect_emotion,
+                fallback_emotion=last_emotion,
+            )
+            if result["metrics"].get("emotion_analyzed"):
+                last_emotion = result["emotion"]
+                last_emotion_at = now
+
             stable_emotion, stable_focus = smoother.update(
                 result["emotion"], result["focused"]
             )

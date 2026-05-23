@@ -1,5 +1,6 @@
 from pathlib import Path
 from uuid import uuid4
+from io import BytesIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlmodel import Session
@@ -11,8 +12,15 @@ from app.services.auth_service import create_user, authenticate_user, delete_use
 from app.utils.auth import get_current_user
 from app.utils.hashing import hash_password, verify_password
 from app.utils.jwt_handler import create_access_token
+from PIL import Image, UnidentifiedImageError
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
+
+# Avatar upload constraints
+MAX_AVATAR_SIZE = 2 * 1024 * 1024  # 2 MB
+MAX_AVATAR_DIMENSION = 1024  # max width or height in pixels
+AVATAR_OUTPUT_SIZE = 256  # final square size (pixels)
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
 def _profile_response(user) -> UserProfile:
@@ -118,25 +126,78 @@ async def upload_profile_avatar(
 ):
     if user.id is None:
         raise HTTPException(status_code=500, detail="User record is invalid")
-
+    # Basic content type check
     content_type = file.content_type or ""
     if not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Avatar must be an image file")
 
+    # Read bytes and enforce size limit
+    contents = await file.read()
+    if not contents:
+        raise HTTPException(status_code=400, detail="Avatar file is empty")
+    if len(contents) > MAX_AVATAR_SIZE:
+        raise HTTPException(status_code=400, detail=f"Avatar must be <= {MAX_AVATAR_SIZE // (1024*1024)} MB")
+
+    # Validate and normalize image using Pillow
+    try:
+        img = Image.open(BytesIO(contents))
+        img.verify()
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="Uploaded file is not a valid image")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unable to process image file")
+
+    # Re-open (Pillow requires re-opening after verify)
+    try:
+        img = Image.open(BytesIO(contents)).convert("RGBA")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Unable to open image for processing")
+
+    width, height = img.size
+    if width > MAX_AVATAR_DIMENSION or height > MAX_AVATAR_DIMENSION:
+        # Resize down while preserving aspect ratio
+        img.thumbnail((MAX_AVATAR_DIMENSION, MAX_AVATAR_DIMENSION))
+
+    # Center-crop to square then resize to output size
+    width, height = img.size
+    min_side = min(width, height)
+    left = (width - min_side) // 2
+    top = (height - min_side) // 2
+    right = left + min_side
+    bottom = top + min_side
+    img = img.crop((left, top, right, bottom)).resize((AVATAR_OUTPUT_SIZE, AVATAR_OUTPUT_SIZE))
+
+    # Determine extension/format for saving
     extension = Path(file.filename or "").suffix.lower()
-    if extension not in {".jpg", ".jpeg", ".png", ".gif", ".webp"}:
+    if extension not in ALLOWED_EXTENSIONS:
         extension = ".png"
+
+    format_map = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".gif": "GIF", ".webp": "WEBP"}
+    out_format = format_map.get(extension, "PNG")
 
     uploads_dir = Path("uploads") / "avatars"
     uploads_dir.mkdir(parents=True, exist_ok=True)
     avatar_filename = f"user-{user.id}-{uuid4().hex}{extension}"
     avatar_path = uploads_dir / avatar_filename
 
-    contents = await file.read()
-    if not contents:
-        raise HTTPException(status_code=400, detail="Avatar file is empty")
-    avatar_path.write_bytes(contents)
+    # Save processed image to bytes and then write to disk
+    out_buffer = BytesIO()
+    save_params = {"format": out_format}
+    if out_format == "JPEG":
+        # Remove alpha for JPEG and set quality
+        rgb = Image.new("RGB", img.size, (255, 255, 255))
+        rgb.paste(img, mask=img.split()[3])
+        rgb.save(out_buffer, quality=90, **save_params)
+    else:
+        img.save(out_buffer, **save_params)
 
+    avatar_bytes = out_buffer.getvalue()
+    if len(avatar_bytes) > MAX_AVATAR_SIZE:
+        raise HTTPException(status_code=400, detail="Processed avatar exceeds size limit")
+
+    avatar_path.write_bytes(avatar_bytes)
+
+    # Persist URL to DB
     user.avatar_url = f"/uploads/avatars/{avatar_filename}"
     user.updated_at = datetime.utcnow()
     session.add(user)
@@ -145,6 +206,52 @@ async def upload_profile_avatar(
 
     return _profile_response(user)
 
+
+@router.delete("/profile/avatar", response_model=UserProfile)
+def remove_profile_avatar(session: Session = Depends(get_session), user=Depends(get_current_user)):
+    """Remove the user's avatar file (if local) and clear the DB field."""
+    if user.id is None:
+        raise HTTPException(status_code=500, detail="User record is invalid")
+
+    avatar = user.avatar_url
+    # If there's no avatar set, return 404
+    if not avatar:
+        raise HTTPException(status_code=404, detail="No avatar to remove")
+
+    # Attempt to remove local file if it's in our uploads directory
+    try:
+        # Only attempt to delete if the avatar URL points to our uploads folder
+        if isinstance(avatar, str) and (avatar.startswith("/uploads/") or avatar.startswith("uploads/")):
+            # Support leading slash or not
+            rel_path = avatar.lstrip("/")
+            target = Path(rel_path)
+            uploads_dir = (Path("uploads") / "avatars").resolve()
+            try:
+                resolved = target.resolve()
+            except Exception:
+                # If resolution fails, build absolute from cwd
+                resolved = (Path.cwd() / target).resolve()
+
+            # Safety check: ensure target is inside uploads/avatars
+            if str(resolved).startswith(str(uploads_dir)):
+                if resolved.exists() and resolved.is_file():
+                    try:
+                        resolved.unlink()
+                    except Exception:
+                        # ignore deletion errors
+                        pass
+    except Exception:
+        # Don't fail the operation if file deletion has unexpected errors
+        pass
+
+    # Clear DB field and commit
+    user.avatar_url = None
+    user.updated_at = datetime.utcnow()
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+
+    return _profile_response(user)
 
 @router.delete("/delete-user")
 def delete_user(session: Session = Depends(get_session), user=Depends(get_current_user)):

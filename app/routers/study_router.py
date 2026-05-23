@@ -454,6 +454,14 @@ def _ensure_earned_achievements(user, db: Session) -> None:
                     achievement_title=achievement.title,
                 )
             )
+            db.add(
+                Notification(
+                    user_id=user.id,
+                    type="achievement",
+                    title="Achievement unlocked",
+                    message=f"You unlocked {achievement.title}.",
+                )
+            )
             changed = True
 
     if changed:
@@ -976,6 +984,14 @@ def unlock_achievement(
         achievement_title=achievement.title,
     )
     db.add(user_achievement)
+    db.add(
+        Notification(
+            user_id=user.id,
+            type="achievement",
+            title="Achievement unlocked",
+            message=f"You unlocked {achievement.title}.",
+        )
+    )
     db.commit()
     db.refresh(user_achievement)
     return {
@@ -986,15 +1002,41 @@ def unlock_achievement(
 
 @router.get("/notifications")
 def list_notifications(
+    limit: Optional[int] = Query(default=None, ge=1, le=100),
+    db: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    _ensure_earned_achievements(user, db)
+    statement = (
+        select(Notification)
+        .where(Notification.user_id == user.id)
+        .order_by(text("read ASC, created_at DESC, id DESC"))
+    )
+    if limit is not None:
+        statement = statement.limit(limit)
+
+    notifications = db.exec(statement).all()
+    return [notification.model_dump(mode="json") for notification in notifications]
+
+
+@router.patch("/notifications/read-all")
+def mark_all_notifications_read(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
     notifications = db.exec(
-        select(Notification)
-        .where(Notification.user_id == user.id)
-        .order_by(text("read ASC, created_at DESC, id DESC"))
+        select(Notification).where(
+            Notification.user_id == user.id,
+            Notification.read == False,  # noqa: E712
+        )
     ).all()
-    return [notification.model_dump(mode="json") for notification in notifications]
+
+    for notification in notifications:
+        notification.read = True
+        db.add(notification)
+
+    db.commit()
+    return {"updated": len(notifications)}
 
 
 @router.patch("/notifications/{notification_id}")

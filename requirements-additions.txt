@@ -1,0 +1,2 @@
+# Additional dependencies for image processing
+Pillow>=9.0.0

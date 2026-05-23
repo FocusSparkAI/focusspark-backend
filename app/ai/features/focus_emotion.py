@@ -44,6 +44,7 @@ OFF_CENTER_THRESHOLD = 0.18
 NON_NEUTRAL_EMOTION_CONF_THRESHOLD = 18.0
 NEUTRAL_EMOTION_CONF_THRESHOLD = 28.0
 HAPPY_SCORE_BONUS = 4.0
+EMOTION_INTERVAL_SECONDS = 5.0
 
 
 def _env_float(name, default):
@@ -75,6 +76,9 @@ NEUTRAL_EMOTION_CONF_THRESHOLD = _env_float(
     "NEUTRAL_EMOTION_CONF_THRESHOLD", NEUTRAL_EMOTION_CONF_THRESHOLD
 )
 HAPPY_SCORE_BONUS = _env_float("HAPPY_SCORE_BONUS", HAPPY_SCORE_BONUS)
+EMOTION_INTERVAL_SECONDS = _env_float(
+    "EMOTION_INTERVAL_SECONDS", EMOTION_INTERVAL_SECONDS
+)
 
 
 def _clip01(value):
@@ -272,7 +276,7 @@ def _predict_emotion(face_crop):
     return best_label, best_score, normalized_scores
 
 
-def analyze_frame(img_bgr):
+def analyze_frame(img_bgr, detect_emotion=True, fallback_emotion="Neutral"):
     if img_bgr is None:
         return {
             "emotion": "Neutral",
@@ -409,8 +413,24 @@ def analyze_frame(img_bgr):
 
     metrics["reason"] = reason
 
-    face_crop = _crop_face(img_bgr, bbox) if has_face else None
-    emotion, emotion_score, emotion_scores = _predict_emotion(face_crop)
+    can_detect_emotion = (
+        detect_emotion
+        and has_face
+        and face_score >= FACE_CONF_THRESHOLD
+        and face_area >= FACE_AREA_THRESHOLD
+        and blur_variance >= (BLUR_VARIANCE_THRESHOLD * 0.35)
+    )
+
+    if can_detect_emotion:
+        face_crop = _crop_face(img_bgr, bbox)
+        emotion, emotion_score, emotion_scores = _predict_emotion(face_crop)
+        metrics["emotion_analyzed"] = True
+    else:
+        emotion = fallback_emotion or "Neutral"
+        emotion_score = 0.0
+        emotion_scores = {}
+        metrics["emotion_analyzed"] = False
+
     metrics["emotion_confidence"] = round(float(emotion_score), 2)
     metrics["emotion_scores"] = {
         key: round(float(value), 2) for key, value in emotion_scores.items()
