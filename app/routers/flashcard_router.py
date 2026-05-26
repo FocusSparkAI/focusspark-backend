@@ -2,11 +2,11 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import text
 from sqlmodel import Session
 from app.db.database import get_session
 from sqlmodel import select
 from app.models.flashcard_model import FlashcardDeck, Flashcard, FlashcardReview
+from app.models.productivity_model import UserSettings
 from app.schemas.flashcard_schema import (
     FlashcardGenerate,
     FlashcardFromChat,
@@ -20,6 +20,15 @@ from app.utils.auth import get_current_user
 
 
 router = APIRouter(prefix="/flashcards", tags=["Flashcards"])
+
+
+def _get_ai_defaults(user_id: int, session: Session) -> tuple[str | None, str | None]:
+    settings = session.exec(
+        select(UserSettings).where(UserSettings.user_id == user_id)
+    ).first()
+    if not settings:
+        return None, None
+    return settings.preferred_ai_provider, settings.preferred_ai_model
 
 
 class FlashcardReviewUpdate(BaseModel):
@@ -58,7 +67,7 @@ def get_flashcard_reviews(
     reviews = session.exec(
         select(FlashcardReview)
         .where(FlashcardReview.user_id == user.id)
-        .order_by(text("next_review_at ASC, id DESC"))
+        .order_by(FlashcardReview.next_review_at.asc(), FlashcardReview.id.desc())
     ).all()
     return [review.model_dump(mode="json") for review in reviews]
 
@@ -88,7 +97,15 @@ def generate_flashcards(data: FlashcardGenerate,
                         session: Session = Depends(get_session),
                         user=Depends(get_current_user)):
     try:
-        return create_flashcards_from_topic(data.topic, user.id, session, data.card_count)
+        provider_name, model_name = _get_ai_defaults(user.id, session)
+        return create_flashcards_from_topic(
+            data.topic,
+            user.id,
+            session,
+            data.card_count,
+            provider_name=provider_name,
+            model_name=model_name,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

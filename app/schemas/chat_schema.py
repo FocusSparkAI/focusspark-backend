@@ -9,7 +9,8 @@ class ChatRequest(BaseModel):
 
 class CreateThreadRequest(BaseModel):
     title: str | None = None
-    ai_provider: Literal["openai", "gemini"] = "openai"
+    ai_provider: Literal["openai", "gemini"] | None = None
+    ai_model: str | None = None
 
 
 class ChatResponse(BaseModel):

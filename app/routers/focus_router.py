@@ -1,8 +1,11 @@
 import json
+import logging
 import time
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect, WebSocketException, status
 from pydantic import BaseModel
+from sqlmodel import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.ai.features.focus_emotion import (
     DetectionSmoother,
@@ -10,9 +13,12 @@ from app.ai.features.focus_emotion import (
     analyze_frame,
     decode_base64_image,
 )
+from app.db.database import engine
+from app.utils.auth import get_current_user, resolve_user_from_token
 
 
 router = APIRouter(tags=["Focus"])
+logger = logging.getLogger(__name__)
 
 
 class FocusFrameRequest(BaseModel):
@@ -28,7 +34,7 @@ def _build_invalid_image_response():
 
 
 @router.post("/analyze")
-def analyze_focus_frame(payload: FocusFrameRequest):
+def analyze_focus_frame(payload: FocusFrameRequest, user=Depends(get_current_user)):
     img = decode_base64_image(payload.image)
     if img is None:
         return _build_invalid_image_response()
@@ -36,8 +42,20 @@ def analyze_focus_frame(payload: FocusFrameRequest):
     return analyze_frame(img)
 
 
+def _authenticate_websocket_token(token: str | None):
+    if not token:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION)
+
+    try:
+        with Session(engine) as session:
+            return resolve_user_from_token(token, session)
+    except Exception as exc:
+        raise WebSocketException(code=status.WS_1008_POLICY_VIOLATION) from exc
+
+
 @router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
+    _authenticate_websocket_token(token)
     await websocket.accept()
     smoother = DetectionSmoother(window_size=7)
     last_emotion = "Neutral"
@@ -46,7 +64,11 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            message = json.loads(data)
+            try:
+                message = json.loads(data)
+            except json.JSONDecodeError:
+                await websocket.send_text(json.dumps({"error": "invalid_json"}))
+                continue
 
             if "image" not in message:
                 await websocket.send_text(json.dumps({"error": "image_required"}))
@@ -63,7 +85,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 or (now - last_emotion_at) >= EMOTION_INTERVAL_SECONDS
             )
 
-            result = analyze_frame(
+            result = await run_in_threadpool(
+                analyze_frame,
                 img,
                 detect_emotion=should_detect_emotion,
                 fallback_emotion=last_emotion,
@@ -86,7 +109,5 @@ async def websocket_endpoint(websocket: WebSocket):
                 )
             )
 
-    except json.JSONDecodeError:
-        await websocket.send_text(json.dumps({"error": "invalid_json"}))
     except WebSocketDisconnect:
-        print("Client disconnected")
+        logger.info("focus_websocket_disconnected")

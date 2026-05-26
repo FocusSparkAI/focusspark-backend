@@ -111,6 +111,8 @@ class UserSettings(SQLModel, table=True):
     pomodoro_duration_minutes: int = 25
     break_duration_minutes: int = 5
     ai_persona: str = Field(default="supportive", max_length=100)
+    preferred_ai_provider: str = Field(default="openai", max_length=50)
+    preferred_ai_model: Optional[str] = Field(default=None, max_length=255)
     focus_sensitivity: str = Field(default="medium", max_length=50)
     fallback_method: str = Field(default="manual", max_length=50)
     notifications_enabled: bool = True

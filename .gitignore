@@ -41,6 +41,7 @@ coverage.xml
 # Logs and databases
 *.log
 logs/
+uploads/
 *.sqlite3
 *.db
 *.sqlite
@@ -64,4 +65,5 @@ desktop.ini
 
 # Misc
 *.pyc
+*.bak
 camera_roll/

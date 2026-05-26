@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+
 from jose import jwt, JWTError
 from app.core.config import JWT_SECRET, JWT_ALGORITHM, ACCESS_TOKEN_EXPIRE_DAYS
 
@@ -16,4 +18,22 @@ def decode_access_token(token: str):
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         return payload
     except JWTError:
+        return None
+
+
+def get_token_expiration(token: str) -> Optional[datetime]:
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+
+    expires_at = payload.get("exp")
+    if expires_at is None:
+        return None
+
+    if isinstance(expires_at, datetime):
+        return expires_at
+
+    try:
+        return datetime.fromtimestamp(int(expires_at), tz=timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OSError):
         return None

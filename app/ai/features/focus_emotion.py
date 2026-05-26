@@ -45,6 +45,15 @@ NON_NEUTRAL_EMOTION_CONF_THRESHOLD = 18.0
 NEUTRAL_EMOTION_CONF_THRESHOLD = 28.0
 HAPPY_SCORE_BONUS = 4.0
 EMOTION_INTERVAL_SECONDS = 5.0
+MAX_IMAGE_BYTES = 3_000_000
+FOCUS_SCORE_WEIGHTS = {
+    "ear": 0.21,
+    "head": 0.19,
+    "yaw": 0.17,
+    "gaze": 0.19,
+    "center": 0.10,
+    "blur": 0.14,
+}
 
 
 def _env_float(name, default):
@@ -79,6 +88,7 @@ HAPPY_SCORE_BONUS = _env_float("HAPPY_SCORE_BONUS", HAPPY_SCORE_BONUS)
 EMOTION_INTERVAL_SECONDS = _env_float(
     "EMOTION_INTERVAL_SECONDS", EMOTION_INTERVAL_SECONDS
 )
+MAX_IMAGE_BYTES = int(_env_float("MAX_IMAGE_BYTES", MAX_IMAGE_BYTES))
 
 
 def _clip01(value):
@@ -87,8 +97,16 @@ def _clip01(value):
 
 def decode_base64_image(image_data: str):
     try:
+        if not isinstance(image_data, str):
+            return None
+
         encoded = image_data.split(",", 1)[1] if "," in image_data else image_data
-        nparr = np.frombuffer(base64.b64decode(encoded), np.uint8)
+        encoded = encoded.strip()
+        raw = base64.b64decode(encoded, validate=True)
+        if len(raw) > MAX_IMAGE_BYTES:
+            return None
+
+        nparr = np.frombuffer(raw, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         return img
     except Exception:
@@ -372,13 +390,13 @@ def analyze_frame(img_bgr, detect_emotion=True, fallback_emotion="Neutral"):
             blur_score = _clip01(blur_variance / max(BLUR_VARIANCE_THRESHOLD, 1e-6))
             center_score = _clip01(1.0 - (face_center_offset / max(OFF_CENTER_THRESHOLD, 1e-6)))
 
-            focus_score = (
-                0.22 * ear_score
-                + 0.20 * head_score
-                + 0.18 * yaw_score
-                + 0.20 * gaze_score
-                + 0.10 * center_score
-                + 0.15 * blur_score
+            focus_score = _clip01(
+                FOCUS_SCORE_WEIGHTS["ear"] * ear_score
+                + FOCUS_SCORE_WEIGHTS["head"] * head_score
+                + FOCUS_SCORE_WEIGHTS["yaw"] * yaw_score
+                + FOCUS_SCORE_WEIGHTS["gaze"] * gaze_score
+                + FOCUS_SCORE_WEIGHTS["center"] * center_score
+                + FOCUS_SCORE_WEIGHTS["blur"] * blur_score
             )
             metrics["focus_score"] = round(focus_score, 3)
 

@@ -3,13 +3,14 @@ from uuid import uuid4
 from io import BytesIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlmodel import Session
+from sqlmodel import Session, select
 from datetime import datetime
 
 from app.schemas.user_schema import UserSignup, UserLogin, UserPasswordUpdate, UserProfile, UserProfileUpdate
 from app.db.database import get_session
-from app.services.auth_service import create_user, authenticate_user, delete_user_by_id
-from app.utils.auth import get_current_user
+from app.models.productivity_model import Achievement, Notification, UserAchievement
+from app.services.auth_service import create_user, authenticate_user, delete_user_by_id, expire_access_token
+from app.utils.auth import get_current_user, oauth2_scheme
 from app.utils.hashing import hash_password, verify_password
 from app.utils.jwt_handler import create_access_token
 from PIL import Image, UnidentifiedImageError
@@ -31,7 +32,56 @@ def _profile_response(user) -> UserProfile:
         academic_focus=user.academic_focus,
         bio=user.bio,
         avatar_url=user.avatar_url,
+        last_login=user.last_login,
         created_at=user.created_at,
+    )
+
+
+def _unlock_account_created_achievement(user_id: int, session: Session) -> None:
+    achievement = session.exec(
+        select(Achievement).where(Achievement.key == "account_created")
+    ).first()
+    if not achievement:
+        achievement = Achievement(
+            key="account_created",
+            title="Welcome to FocusSpark",
+            description="Create your FocusSpark account.",
+            badge_icon="user-check",
+            criteria_type="account_created",
+            criteria_target=1,
+            criteria_data={"tier": "bronze"},
+        )
+        session.add(achievement)
+        session.flush()
+
+    if achievement.id is None:
+        session.flush()
+    if achievement.id is None:
+        return
+
+    existing = session.exec(
+        select(UserAchievement).where(
+            UserAchievement.user_id == user_id,
+            UserAchievement.achievement_id == achievement.id,
+        )
+    ).first()
+    if existing:
+        return
+
+    session.add(
+        UserAchievement(
+            user_id=user_id,
+            achievement_id=achievement.id,
+            achievement_title=achievement.title,
+        )
+    )
+    session.add(
+        Notification(
+            user_id=user_id,
+            type="achievement",
+            title="Achievement unlocked",
+            message=f"You unlocked {achievement.title}.",
+        )
     )
 
 
@@ -39,6 +89,9 @@ def _profile_response(user) -> UserProfile:
 def signup(user: UserSignup, session: Session = Depends(get_session)):
     try:
         new_user = create_user(user, session)
+        if new_user.id is not None:
+            _unlock_account_created_achievement(new_user.id, session)
+            session.commit()
         token = create_access_token({"user_id": new_user.id})
         return {
             "message": "User created successfully",
@@ -56,6 +109,12 @@ def login(user: UserLogin, session: Session = Depends(get_session)):
     db_user = authenticate_user(user, session)
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    db_user.last_login = datetime.utcnow()
+    db_user.updated_at = datetime.utcnow()
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
 
     token = create_access_token({"user_id": db_user.id})
     return {"token_type": "bearer", "access_token": token}
@@ -254,7 +313,12 @@ def remove_profile_avatar(session: Session = Depends(get_session), user=Depends(
     return _profile_response(user)
 
 @router.delete("/delete-user")
-def delete_user(session: Session = Depends(get_session), user=Depends(get_current_user)):
+def delete_user(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    expire_access_token(token, user.id, session)
     deleted = delete_user_by_id(user.id, session)
     if not deleted:
         raise HTTPException(status_code=404, detail="User not found")

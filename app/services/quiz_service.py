@@ -1,14 +1,31 @@
+import logging
+
 from sqlmodel import Session, select
 from app.ai.features.quiz import quiz_feature
 from app.models.quiz_model import Quiz, QuizQuestion, QuizDifficulty
 from app.models.chat_model import MessageArtifact, ChatMessage, ChatThread
+from app.services.achievement_service import award_earned_achievements_for_user
 
 
 DEFAULT_CHAT_QUIZ_DIFFICULTY = QuizDifficulty.BEGINNER
+logger = logging.getLogger(__name__)
 
 
-def generate_quiz_ai(content: str, difficulty: QuizDifficulty):
-    return quiz_feature(content, difficulty)
+def _award_quiz_achievements(user_id: int, session: Session) -> None:
+    try:
+        award_earned_achievements_for_user(user_id, session)
+    except Exception:
+        session.rollback()
+        logger.warning("quiz_achievement_award_failed user_id=%s", user_id, exc_info=True)
+
+
+def generate_quiz_ai(
+    content: str,
+    difficulty: QuizDifficulty,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+):
+    return quiz_feature(content, difficulty, provider_name=provider_name, model_name=model_name)
 
 
 def _validate_quiz_questions(questions):
@@ -113,8 +130,12 @@ def create_quiz_from_topic(
     user_id: int,
     session: Session,
     difficulty: QuizDifficulty,
+    provider_name: str | None = None,
+    model_name: str | None = None,
 ):
-    questions = _validate_quiz_questions(generate_quiz_ai(topic, difficulty))
+    questions = _validate_quiz_questions(
+        generate_quiz_ai(topic, difficulty, provider_name=provider_name, model_name=model_name)
+    )
     quiz = Quiz(
         user_id=user_id,
         title=topic,
@@ -149,13 +170,15 @@ def create_quiz_from_topic(
         .where(QuizQuestion.quiz_id == quiz.id)
         .order_by(QuizQuestion.position.asc(), QuizQuestion.id.asc())
     ).all()
-    return {
+    response = {
         "quiz": quiz.model_dump(mode="json"),
         "questions": [
             question.model_dump(mode="json")
             for question in created_questions
         ],
     }
+    _award_quiz_achievements(user_id, session)
+    return response
 
 
 # ✅ FROM CHAT
@@ -236,10 +259,12 @@ def create_quiz_from_chat(message_id: int, user_id: int, session: Session):
         .where(QuizQuestion.quiz_id == quiz.id)
         .order_by(QuizQuestion.position.asc(), QuizQuestion.id.asc())
     ).all()
-    return {
+    response = {
         "quiz": quiz.model_dump(mode="json"),
         "questions": [
             question.model_dump(mode="json")
             for question in created_questions
         ],
     }
+    _award_quiz_achievements(user_id, session)
+    return response

@@ -1,15 +1,47 @@
-from app.ai.provider import get_provider, provider
+from app.ai.provider import get_provider
+from app.ai.settings import settings
 
 
-def generate_text(prompt: str, provider_name: str | None = None) -> str:
+SUPPORTED_PROVIDERS = ("openai", "gemini")
+
+
+def _normalize_provider(provider_name: str | None) -> str:
+    normalized = (provider_name or settings.provider or "openai").strip().lower()
+    if normalized not in SUPPORTED_PROVIDERS:
+        return "openai"
+    return normalized
+
+
+def _provider_order(provider_name: str | None) -> list[str]:
+    preferred = _normalize_provider(provider_name)
+    return [preferred, *[name for name in SUPPORTED_PROVIDERS if name != preferred]]
+
+
+def generate_text(
+    prompt: str,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+    allow_fallback: bool = True,
+) -> str:
     """Generate text using the specified provider.
 
-    If `provider_name` is None, the module-level default `provider` is used.
-    The model is determined by the provider instance (thread or settings).
+    If the preferred provider fails, the other configured provider is tried.
+    A custom model is applied only to the preferred provider.
     """
-    if provider_name:
-        p = get_provider(provider_name)
-    else:
-        p = provider
+    providers = _provider_order(provider_name)
+    if not allow_fallback:
+        providers = providers[:1]
 
-    return p.generate(prompt)
+    last_error: Exception | None = None
+    preferred_provider = providers[0]
+    for current_provider in providers:
+        try:
+            provider_model = model_name if current_provider == preferred_provider else None
+            return get_provider(current_provider, provider_model).generate(prompt)
+        except Exception as exc:
+            last_error = exc
+
+    if last_error:
+        raise last_error
+
+    raise RuntimeError("No AI providers are configured")

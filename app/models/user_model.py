@@ -33,5 +33,6 @@ class User(SQLModel, table=True):
     preferred_break_duration: int = 5
     academic_focus: AcademicFocus
     accepted_terms: bool = Field(default=False)
+    last_login: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

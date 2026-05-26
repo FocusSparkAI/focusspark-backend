@@ -1,6 +1,6 @@
 from sqlmodel import SQLModel, create_engine, Session
 from sqlalchemy import inspect, text
-from app.core.config import DATABASE_URL
+from app.core.config import DATABASE_URL, SQL_ECHO
 from app.models.chat_model import ChatMessage, ChatThread, Document, MessageArtifact
 from app.models.flashcard_model import Flashcard, FlashcardDeck, FlashcardReview
 from app.models.productivity_model import (
@@ -14,11 +14,12 @@ from app.models.productivity_model import (
     UserSettings,
 )
 from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQuestion
+from app.models.token_model import ExpiredToken
 from app.models.user_model import User
 from sqlmodel import select
 
 assert DATABASE_URL is not None
-engine = create_engine(DATABASE_URL, echo=True)
+engine = create_engine(DATABASE_URL, echo=SQL_ECHO)
 
 def get_session():
     with Session(engine) as session:
@@ -28,6 +29,7 @@ def get_session():
 def init_db():
     SQLModel.metadata.create_all(engine)
     _ensure_user_profile_columns()
+    _ensure_user_settings_columns()
     _seed_default_achievements()
 
 
@@ -45,6 +47,8 @@ def _ensure_user_profile_columns():
         additions.append(("avatar_url", "VARCHAR(1024) NULL"))
     if "updated_at" not in existing:
         additions.append(("updated_at", f"{timestamp_type} NULL"))
+    if "last_login" not in existing:
+        additions.append(("last_login", f"{timestamp_type} NULL"))
 
     if not additions:
         return
@@ -54,16 +58,45 @@ def _ensure_user_profile_columns():
             connection.execute(text(f"ALTER TABLE users ADD COLUMN {column_name} {definition}"))
 
 
+def _ensure_user_settings_columns():
+    inspector = inspect(engine)
+    if not inspector.has_table("user_settings"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("user_settings")}
+    additions = []
+    if "preferred_ai_provider" not in existing:
+        additions.append(("preferred_ai_provider", "VARCHAR(50) NULL"))
+    if "preferred_ai_model" not in existing:
+        additions.append(("preferred_ai_model", "VARCHAR(255) NULL"))
+
+    if not additions:
+        return
+
+    with engine.begin() as connection:
+        for column_name, definition in additions:
+            connection.execute(text(f"ALTER TABLE user_settings ADD COLUMN {column_name} {definition}"))
+
+
 def _seed_default_achievements():
     defaults = [
+        {
+            "key": "account_created",
+            "title": "Welcome to FocusSpark",
+            "description": "Create your FocusSpark account.",
+            "badge_icon": "user-check",
+            "criteria_type": "account_created",
+            "criteria_target": 1,
+            "criteria_data": {"tier": "bronze"},
+        },
         {
             "key": "first_session",
             "title": "First Step",
             "description": "Complete your first study session.",
-            "badge_icon": "clock",
+            "badge_icon": "play-circle",
             "criteria_type": "sessions_completed",
             "criteria_target": 1,
-            "criteria_data": {"tier": "bronze", "reward": "Blue timer theme unlocked"},
+            "criteria_data": {"tier": "bronze"},
         },
         {
             "key": "streak_starter",
@@ -72,13 +105,13 @@ def _seed_default_achievements():
             "badge_icon": "flame",
             "criteria_type": "streak_days",
             "criteria_target": 7,
-            "criteria_data": {"tier": "silver", "reward": "Fire avatar border"},
+            "criteria_data": {"tier": "silver"},
         },
         {
             "key": "focus_master",
             "title": "Focus Master",
             "description": "Complete a session with 100% focus.",
-            "badge_icon": "trophy",
+            "badge_icon": "shield-check",
             "criteria_type": "distraction_free_sessions",
             "criteria_target": 1,
             "criteria_data": {"tier": "gold"},
@@ -87,10 +120,10 @@ def _seed_default_achievements():
             "key": "session_collector",
             "title": "Session Collector",
             "description": "Complete 100 focused study blocks.",
-            "badge_icon": "brain",
+            "badge_icon": "boxes",
             "criteria_type": "work_sessions_completed",
             "criteria_target": 100,
-            "criteria_data": {"tier": "silver", "reward": "Purple gradient theme"},
+            "criteria_data": {"tier": "silver"},
         },
         {
             "key": "focus_champion",
@@ -105,7 +138,7 @@ def _seed_default_achievements():
             "key": "early_bird",
             "title": "Early Bird",
             "description": "Start a study session before 7 AM.",
-            "badge_icon": "zap",
+            "badge_icon": "sunrise",
             "criteria_type": "early_sessions",
             "criteria_target": 1,
             "criteria_data": {"tier": "bronze"},
@@ -114,7 +147,7 @@ def _seed_default_achievements():
             "key": "night_owl",
             "title": "Night Owl",
             "description": "Study after midnight.",
-            "badge_icon": "star",
+            "badge_icon": "moon",
             "criteria_type": "late_sessions",
             "criteria_target": 1,
             "criteria_data": {"tier": "bronze"},
@@ -138,13 +171,58 @@ def _seed_default_achievements():
             "criteria_data": {"tier": "silver"},
         },
         {
+            "key": "first_quiz",
+            "title": "Quiz Starter",
+            "description": "Create your first quiz.",
+            "badge_icon": "clipboard-check",
+            "criteria_type": "quizzes_created",
+            "criteria_target": 1,
+            "criteria_data": {"tier": "bronze"},
+        },
+        {
+            "key": "quiz_builder",
+            "title": "Quiz Builder",
+            "description": "Create 5 quizzes.",
+            "badge_icon": "list-checks",
+            "criteria_type": "quizzes_created",
+            "criteria_target": 5,
+            "criteria_data": {"tier": "silver"},
+        },
+        {
+            "key": "first_flashcard_deck",
+            "title": "Flashcard Starter",
+            "description": "Create your first flashcard deck.",
+            "badge_icon": "layers",
+            "criteria_type": "flashcard_decks_created",
+            "criteria_target": 1,
+            "criteria_data": {"tier": "bronze"},
+        },
+        {
+            "key": "flashcard_builder",
+            "title": "Flashcard Builder",
+            "description": "Create 5 flashcard decks.",
+            "badge_icon": "layers",
+            "criteria_type": "flashcard_decks_created",
+            "criteria_target": 5,
+            "criteria_data": {"tier": "silver"},
+        },
+        {
+            "key": "first_document",
+            "title": "First Upload",
+            "description": "Upload your first study document.",
+            "badge_icon": "upload",
+            "criteria_type": "documents_uploaded",
+            "criteria_target": 1,
+            "criteria_data": {"tier": "bronze"},
+        },
+        {
             "key": "consistency_king",
             "title": "Consistency King",
             "description": "Maintain a 30-day streak.",
-            "badge_icon": "calendar",
+            "badge_icon": "calendar-days",
             "criteria_type": "streak_days",
             "criteria_target": 30,
-            "criteria_data": {"tier": "platinum", "reward": "Crown avatar icon"},
+            "criteria_data": {"tier": "platinum"},
         },
         {
             "key": "perfect_score",
@@ -165,12 +243,49 @@ def _seed_default_achievements():
             "criteria_data": {"tier": "gold"},
         },
     ]
+    seed_order = [
+        "account_created",
+        "first_session",
+        "first_quiz",
+        "first_flashcard_deck",
+        "first_document",
+        "early_bird",
+        "night_owl",
+        "focus_master",
+        "quiz_builder",
+        "flashcard_builder",
+        "streak_starter",
+        "momentum_builder",
+        "marathon_runner",
+        "focus_champion",
+        "knowledge_seeker",
+        "session_collector",
+        "perfect_score",
+        "consistency_king",
+    ]
+    defaults.sort(
+        key=lambda item: (
+            seed_order.index(item["key"]) if item["key"] in seed_order else len(seed_order),
+            item["criteria_target"],
+            item["title"],
+        )
+    )
 
     with Session(engine) as session:
         existing_keys = set(session.exec(select(Achievement.key)).all())
         added = False
         for item in defaults:
             if item["key"] in existing_keys:
+                existing = session.exec(select(Achievement).where(Achievement.key == item["key"])).first()
+                if existing:
+                    existing.title = item["title"]
+                    existing.description = item["description"]
+                    existing.badge_icon = item["badge_icon"]
+                    existing.criteria_type = item["criteria_type"]
+                    existing.criteria_target = item["criteria_target"]
+                    existing.criteria_data = item["criteria_data"]
+                    session.add(existing)
+                    added = True
                 continue
             session.add(Achievement(**item))
             added = True

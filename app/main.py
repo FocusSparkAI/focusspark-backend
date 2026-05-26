@@ -2,17 +2,25 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from app.core.config import CORS_ORIGINS
+from app.core.logging import configure_logging
 from app.db.database import init_db
+from app.middleware.logging import RequestLoggingMiddleware
 from app.routers import auth_router, flashcard_router, quiz_router, chat_router, focus_router, study_router
+
+configure_logging()
 
 Path("uploads").mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="FocusSpark API")
 
+app.add_middleware(RequestLoggingMiddleware)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_origin_regex=".*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

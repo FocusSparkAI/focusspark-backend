@@ -2,12 +2,11 @@ import csv
 import io
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import text
 from sqlmodel import Session, select
 
 from app.db.database import get_session
@@ -24,6 +23,7 @@ from app.models.productivity_model import (
     UserSettings,
 )
 from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQuestion
+from app.services.achievement_service import award_earned_achievements, compute_achievement_progress
 from app.utils.auth import get_current_user
 
 
@@ -83,6 +83,8 @@ class UserSettingsUpdate(BaseModel):
     pomodoro_duration_minutes: Optional[int] = PydanticField(default=None, gt=0)
     break_duration_minutes: Optional[int] = PydanticField(default=None, ge=0)
     ai_persona: Optional[str] = None
+    preferred_ai_provider: Optional[Literal["openai", "gemini"]] = None
+    preferred_ai_model: Optional[str] = None
     focus_sensitivity: Optional[str] = None
     fallback_method: Optional[str] = None
     notifications_enabled: Optional[bool] = None
@@ -108,7 +110,48 @@ class AchievementResponse(BaseModel):
     progress_current: int
     progress_target: int
     tier: str = "bronze"
-    reward: Optional[str] = None
+    unlock_order: int = 999
+
+
+ACHIEVEMENT_UNLOCK_ORDER = [
+    "account_created",
+    "first_session",
+    "first_quiz",
+    "first_flashcard_deck",
+    "first_document",
+    "early_bird",
+    "night_owl",
+    "focus_master",
+    "quiz_builder",
+    "flashcard_builder",
+    "streak_starter",
+    "momentum_builder",
+    "marathon_runner",
+    "focus_champion",
+    "knowledge_seeker",
+    "session_collector",
+    "perfect_score",
+    "consistency_king",
+]
+
+
+def _achievement_unlock_order(achievement: Achievement) -> int:
+    try:
+        return ACHIEVEMENT_UNLOCK_ORDER.index(achievement.key or "")
+    except ValueError:
+        return len(ACHIEVEMENT_UNLOCK_ORDER)
+
+
+def _ordered_achievements(db: Session) -> list[Achievement]:
+    achievements = db.exec(select(Achievement).order_by(Achievement.id.asc())).all()
+    return sorted(
+        achievements,
+        key=lambda achievement: (
+            _achievement_unlock_order(achievement),
+            achievement.criteria_target or 0,
+            achievement.title,
+        ),
+    )
 
 
 def _get_owned_session(session_id: int, user_id: int, db: Session) -> StudySession:
@@ -164,7 +207,7 @@ def _user_sessions_query(
     if end_dt is not None:
         statement = statement.where(StudySession.started_at <= end_dt)
 
-    return statement.order_by(text("started_at DESC, id DESC"))
+    return statement.order_by(StudySession.started_at.desc(), StudySession.id.desc())
 
 
 def _achievement_window_start(achievement: Achievement) -> Optional[datetime]:
@@ -178,62 +221,7 @@ def _compute_achievement_progress(
     user,
     db: Session,
 ) -> tuple[int, int]:
-    target = max(achievement.criteria_target or 1, 1)
-    metric = (achievement.criteria_type or "sessions_completed").lower()
-    window_start = _achievement_window_start(achievement)
-
-    sessions_statement = select(StudySession).where(StudySession.user_id == user.id)
-    if window_start is not None:
-        sessions_statement = sessions_statement.where(StudySession.started_at >= window_start)
-    sessions = db.exec(sessions_statement).all()
-
-    if metric in {"sessions_completed", "completed_sessions"}:
-        current = sum(1 for session in sessions if session.completed)
-    elif metric in {"work_sessions_completed", "work_sessions"}:
-        current = sum(1 for session in sessions if session.completed and session.session_type == "work")
-    elif metric in {"focus_minutes", "study_minutes"}:
-        current = sum(
-            session.actual_duration_minutes or session.planned_duration_minutes
-            for session in sessions
-            if session.completed and session.session_type == "work"
-        )
-    elif metric in {"distraction_free_sessions", "zero_distraction_sessions"}:
-        current = sum(1 for session in sessions if session.completed and (session.distraction_count or 0) == 0)
-    elif metric == "average_focus":
-        work_sessions = [session for session in sessions if session.completed and session.session_type == "work"]
-        current = (
-            round(
-                sum(
-                    100 if session.distraction_count == 0 else max(0, 100 - (session.distraction_count * 10))
-                    for session in work_sessions
-                )
-                / len(work_sessions)
-            )
-            if work_sessions
-            else 0
-        )
-    elif metric == "early_sessions":
-        current = sum(1 for session in sessions if session.started_at and session.started_at.hour < 7)
-    elif metric == "late_sessions":
-        current = sum(1 for session in sessions if session.started_at and session.started_at.hour == 0)
-    elif metric == "daily_sessions":
-        counts: dict[date, int] = {}
-        for session in sessions:
-            if not session.completed or not session.started_at:
-                continue
-            session_date = session.started_at.date()
-            counts[session_date] = counts.get(session_date, 0) + 1
-        current = max(counts.values(), default=0)
-    elif metric == "documents_uploaded":
-        current = 0
-    elif metric in {"streak_days", "current_streak"}:
-        current = int(getattr(user, "current_streak", 0) or 0)
-    elif metric == "total_focus_minutes":
-        current = int(getattr(user, "total_focus_minutes", 0) or 0)
-    else:
-        current = 0
-
-    return current, target
+    return compute_achievement_progress(achievement, user, db)
 
 
 def _session_minutes(session: StudySession) -> int:
@@ -304,7 +292,7 @@ def _sessions_for_recent_days(user_id: int, db: Session, days: int) -> list[Stud
     return db.exec(
         select(StudySession)
         .where(StudySession.user_id == user_id, StudySession.started_at >= start_date)
-        .order_by(text("started_at ASC, id ASC"))
+        .order_by(StudySession.started_at.asc(), StudySession.id.asc())
     ).all()
 
 
@@ -313,7 +301,7 @@ def _sessions_for_recent_weeks(user_id: int, db: Session, weeks: int) -> list[St
     return db.exec(
         select(StudySession)
         .where(StudySession.user_id == user_id, StudySession.started_at >= start_date)
-        .order_by(text("started_at ASC, id ASC"))
+        .order_by(StudySession.started_at.asc(), StudySession.id.asc())
     ).all()
 
 
@@ -432,40 +420,12 @@ def _serialize_achievement(
         "progress_current": current,
         "progress_target": target,
         "tier": criteria_data.get("tier") or "bronze",
-        "reward": criteria_data.get("reward"),
+        "unlock_order": _achievement_unlock_order(achievement),
     }
 
 
 def _ensure_earned_achievements(user, db: Session) -> None:
-    achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
-    existing = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
-    existing_ids = {item.achievement_id for item in existing}
-    changed = False
-
-    for achievement in achievements:
-        if achievement.id in existing_ids:
-            continue
-        current, target = _compute_achievement_progress(achievement, user, db)
-        if current >= target:
-            db.add(
-                UserAchievement(
-                    user_id=user.id,
-                    achievement_id=achievement.id,
-                    achievement_title=achievement.title,
-                )
-            )
-            db.add(
-                Notification(
-                    user_id=user.id,
-                    type="achievement",
-                    title="Achievement unlocked",
-                    message=f"You unlocked {achievement.title}.",
-                )
-            )
-            changed = True
-
-    if changed:
-        db.commit()
+    award_earned_achievements(user, db)
 
 
 def _session_to_dict(session: StudySession) -> dict:
@@ -479,6 +439,7 @@ def _settings_to_dict(settings: UserSettings) -> dict:
 def _delete_records(db: Session, records: list) -> int:
     for record in records:
         db.delete(record)
+    db.flush()
     return len(records)
 
 
@@ -608,11 +569,12 @@ def complete_study_session(
         study_session.distraction_count = payload.distraction_count
     study_session.completed = True
     if payload.notes is not None:
-                study_session.notes = payload.notes
+        study_session.notes = payload.notes
     _recalculate_user_progress(user, db)
     db.add(study_session)
     db.commit()
     db.refresh(study_session)
+    award_earned_achievements(user, db)
     return study_session.model_dump(mode="json")
 
 
@@ -678,7 +640,7 @@ def recent_sessions(
     statement = (
         select(StudySession)
         .where(StudySession.user_id == user.id)
-        .order_by(text("started_at DESC, id DESC"))
+        .order_by(StudySession.started_at.desc(), StudySession.id.desc())
         .limit(limit)
     )
     sessions = db.exec(statement).all()
@@ -810,8 +772,9 @@ def dashboard_stats(
     )
 
     _ensure_earned_achievements(user, db)
-    achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
+    achievements = _ordered_achievements(db)
     unlocked = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
+    unlocked_achievement_ids = {item.achievement_id for item in unlocked}
 
     recent_activity = [
         {
@@ -828,7 +791,7 @@ def dashboard_stats(
         "focus_score": average_focus,
         "current_streak": int(getattr(user, "current_streak", 0) or 0),
         "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
-        "badges_earned": len(unlocked),
+        "badges_earned": len(unlocked_achievement_ids),
         "total_badges": len(achievements),
         "completed_sessions_this_week": len(completed),
         "daily_focus": _daily_focus_rows(sessions, 7),
@@ -863,7 +826,7 @@ def list_study_goals(
     goals = db.exec(
         select(StudyGoal)
         .where(StudyGoal.user_id == user.id)
-        .order_by(text("completed ASC, due_date ASC, id DESC"))
+        .order_by(StudyGoal.completed.asc(), StudyGoal.due_date.asc(), StudyGoal.id.desc())
     ).all()
     return [goal.model_dump(mode="json") for goal in goals]
 
@@ -920,7 +883,7 @@ def list_achievements(
     user=Depends(get_current_user),
 ):
     _ensure_earned_achievements(user, db)
-    achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
+    achievements = _ordered_achievements(db)
     unlocked = db.exec(
         select(UserAchievement).where(UserAchievement.user_id == user.id)
     ).all()
@@ -937,12 +900,12 @@ def list_unlocked_achievements(
     user=Depends(get_current_user),
 ):
     _ensure_earned_achievements(user, db)
-    achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
+    achievements = _ordered_achievements(db)
     achievements_by_id = {achievement.id: achievement for achievement in achievements}
     unlocked = db.exec(
         select(UserAchievement)
         .where(UserAchievement.user_id == user.id)
-        .order_by(text("unlocked_at DESC, id DESC"))
+        .order_by(UserAchievement.unlocked_at.desc(), UserAchievement.id.desc())
     ).all()
     return [
         _serialize_achievement(
@@ -1010,7 +973,7 @@ def list_notifications(
     statement = (
         select(Notification)
         .where(Notification.user_id == user.id)
-        .order_by(text("read ASC, created_at DESC, id DESC"))
+        .order_by(Notification.read.asc(), Notification.created_at.desc(), Notification.id.desc())
     )
     if limit is not None:
         statement = statement.limit(limit)
@@ -1081,6 +1044,11 @@ def update_user_settings(
         settings.break_duration_minutes = payload.break_duration_minutes
     if payload.ai_persona is not None:
         settings.ai_persona = payload.ai_persona
+    if payload.preferred_ai_provider is not None:
+        settings.preferred_ai_provider = payload.preferred_ai_provider
+    if payload.preferred_ai_model is not None:
+        model = payload.preferred_ai_model.strip()
+        settings.preferred_ai_model = model or None
     if payload.focus_sensitivity is not None:
         settings.focus_sensitivity = payload.focus_sensitivity
     if payload.fallback_method is not None:
@@ -1117,7 +1085,7 @@ def export_study_data(
         raise HTTPException(status_code=400, detail="format must be json or csv")
 
     sessions = db.exec(_user_sessions_query(user.id, start_date, end_date)).all()
-    achievements = db.exec(select(Achievement).order_by(text("id ASC"))).all()
+    achievements = _ordered_achievements(db)
     unlocked = db.exec(
         select(UserAchievement).where(UserAchievement.user_id == user.id)
     ).all()

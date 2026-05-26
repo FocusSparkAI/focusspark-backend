@@ -31,6 +31,7 @@ class UserProfile(BaseModel):
     academic_focus: AcademicFocus
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
+    last_login: Optional[datetime] = None
     created_at: datetime
 
 

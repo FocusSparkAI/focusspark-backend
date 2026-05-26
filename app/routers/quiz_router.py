@@ -2,11 +2,11 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field as PydanticField
-from sqlalchemy import text
 from sqlmodel import Session
 from app.db.database import get_session
 from sqlmodel import select
 from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQuestion
+from app.models.productivity_model import UserSettings
 from app.schemas.quiz_schema import QuizGenerate, QuizFromChat, QuizBundleResponse
 from app.services.quiz_service import (
     create_quiz_from_topic,
@@ -16,6 +16,15 @@ from app.utils.auth import get_current_user
 
 
 router = APIRouter(prefix="/quiz", tags=["Quiz"])
+
+
+def _get_ai_defaults(user_id: int, session: Session) -> tuple[str | None, str | None]:
+    settings = session.exec(
+        select(UserSettings).where(UserSettings.user_id == user_id)
+    ).first()
+    if not settings:
+        return None, None
+    return settings.preferred_ai_provider, settings.preferred_ai_model
 
 
 class QuizAttemptAnswerInput(BaseModel):
@@ -56,9 +65,36 @@ def get_all_quizzes(
     session: Session = Depends(get_session),
     user=Depends(get_current_user)
 ):
-    return session.exec(
+    quizzes = session.exec(
         select(Quiz).where(Quiz.user_id == user.id)
     ).all()
+
+    results = []
+    for quiz in quizzes:
+        attempts = session.exec(
+            select(QuizAttempt).where(
+                QuizAttempt.quiz_id == quiz.id,
+                QuizAttempt.user_id == user.id,
+            )
+        ).all()
+        percentages = [float(attempt.percentage or 0) for attempt in attempts]
+        last_attempt = max(
+            attempts,
+            key=lambda attempt: attempt.completed_at or attempt.created_at,
+            default=None,
+        )
+        data = quiz.model_dump(mode="json")
+        data["total_attempts"] = len(attempts)
+        data["best_score"] = round(max(percentages)) if percentages else 0
+        data["average_score"] = round(sum(percentages) / len(percentages)) if percentages else 0
+        data["last_attempted"] = (
+            (last_attempt.completed_at or last_attempt.created_at).isoformat()
+            if last_attempt
+            else None
+        )
+        results.append(data)
+
+    return results
 
 @router.get("/{quiz_id}")
 def get_quiz_questions(
@@ -92,7 +128,15 @@ def generate_quiz(data: QuizGenerate,
                   session: Session = Depends(get_session),
                   user=Depends(get_current_user)):
     try:
-        return create_quiz_from_topic(data.topic, user.id, session, data.difficulty)
+        provider_name, model_name = _get_ai_defaults(user.id, session)
+        return create_quiz_from_topic(
+            data.topic,
+            user.id,
+            session,
+            data.difficulty,
+            provider_name=provider_name,
+            model_name=model_name,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -123,7 +167,7 @@ def get_quiz_attempts(
     attempts = session.exec(
         select(QuizAttempt)
         .where(QuizAttempt.quiz_id == quiz_id, QuizAttempt.user_id == user.id)
-        .order_by(text("created_at DESC, id DESC"))
+        .order_by(QuizAttempt.created_at.desc(), QuizAttempt.id.desc())
     ).all()
     return [attempt.model_dump(mode="json") for attempt in attempts]
 

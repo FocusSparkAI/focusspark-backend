@@ -4,6 +4,7 @@ from app.db.database import get_session
 from sqlmodel import select
 from app.models.chat_model import ChatThread, ChatMessage, MessageArtifact
 from app.models.flashcard_model import FlashcardDeck, Flashcard
+from app.models.productivity_model import UserSettings
 from app.models.quiz_model import Quiz, QuizQuestion
 from app.schemas.chat_schema import ChatRequest, CreateThreadRequest
 from app.services.chat_service import handle_chat, handle_document_chat, create_thread
@@ -94,11 +95,20 @@ def create_chat_thread(
     session: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
+    settings = session.exec(
+        select(UserSettings).where(UserSettings.user_id == user.id)
+    ).first()
+    ai_provider = data.ai_provider or (settings.preferred_ai_provider if settings else None)
+    ai_model = data.ai_model
+    if not ai_model and settings and ai_provider == settings.preferred_ai_provider:
+        ai_model = settings.preferred_ai_model
+
     thread = create_thread(
         data.title.strip() if data.title else None,
         user.id,
         session,
-        ai_provider=data.ai_provider,
+        ai_provider=ai_provider or "openai",
+        ai_model=ai_model,
     )
     return thread
 

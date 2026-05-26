@@ -1,11 +1,30 @@
+import logging
+
 from sqlmodel import Session, select
 from app.ai.features.flashcards import flashcard_feature
 from app.models.flashcard_model import FlashcardDeck, Flashcard
 from app.models.chat_model import MessageArtifact, ChatMessage, ChatThread
+from app.services.achievement_service import award_earned_achievements_for_user
 
 
-def generate_flashcards_ai(content: str, card_count: int | None = None):
-    return flashcard_feature(content, card_count)
+logger = logging.getLogger(__name__)
+
+
+def _award_flashcard_achievements(user_id: int, session: Session) -> None:
+    try:
+        award_earned_achievements_for_user(user_id, session)
+    except Exception:
+        session.rollback()
+        logger.warning("flashcard_achievement_award_failed user_id=%s", user_id, exc_info=True)
+
+
+def generate_flashcards_ai(
+    content: str,
+    card_count: int | None = None,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+):
+    return flashcard_feature(content, card_count, provider_name=provider_name, model_name=model_name)
 
 
 def _validate_flashcards(cards):
@@ -69,8 +88,17 @@ def _derive_topic(thread: ChatThread, message_content: str) -> str | None:
     return fallback[:255] if fallback else None
 
 
-def create_flashcards_from_topic(topic: str, user_id: int, session: Session, card_count: int | None = None):
-    cards = _validate_flashcards(generate_flashcards_ai(topic, card_count))
+def create_flashcards_from_topic(
+    topic: str,
+    user_id: int,
+    session: Session,
+    card_count: int | None = None,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+):
+    cards = _validate_flashcards(
+        generate_flashcards_ai(topic, card_count, provider_name=provider_name, model_name=model_name)
+    )
     deck = FlashcardDeck(
         user_id=user_id,
         title=topic,
@@ -101,10 +129,12 @@ def create_flashcards_from_topic(topic: str, user_id: int, session: Session, car
         select(Flashcard)
         .where(Flashcard.deck_id == deck.id)
     ).all()
-    return {
+    response = {
         "deck": deck.model_dump(mode="json"),
         "flashcards": [flashcard.model_dump(mode="json") for flashcard in created_flashcards],
     }
+    _award_flashcard_achievements(user_id, session)
+    return response
 
 
 # ✅ FROM CHAT
@@ -180,7 +210,9 @@ def create_flashcards_from_chat(message_id: int, user_id: int, session: Session)
         select(Flashcard)
         .where(Flashcard.deck_id == deck.id)
     ).all()
-    return {
+    response = {
         "deck": deck.model_dump(mode="json"),
         "flashcards": [flashcard.model_dump(mode="json") for flashcard in created_flashcards],
     }
+    _award_flashcard_achievements(user_id, session)
+    return response

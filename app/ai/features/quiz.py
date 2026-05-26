@@ -4,7 +4,12 @@ from app.ai.utils import safe_json_load
 from app.models.quiz_model import QuizDifficulty
 
 
-def quiz_feature(content: str, difficulty: QuizDifficulty):
+def quiz_feature(
+    content: str,
+    difficulty: QuizDifficulty,
+    provider_name: str | None = None,
+    model_name: str | None = None,
+):
     prompt = build_quiz_prompt(content, difficulty)
-    result = generate_text(prompt)
+    result = generate_text(prompt, provider_name=provider_name, model_name=model_name)
     return safe_json_load(result)
