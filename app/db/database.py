@@ -30,6 +30,7 @@ def init_db():
     SQLModel.metadata.create_all(engine)
     _ensure_user_profile_columns()
     _ensure_user_settings_columns()
+    _ensure_study_goal_columns()
     _seed_default_achievements()
 
 
@@ -76,6 +77,43 @@ def _ensure_user_settings_columns():
     with engine.begin() as connection:
         for column_name, definition in additions:
             connection.execute(text(f"ALTER TABLE user_settings ADD COLUMN {column_name} {definition}"))
+
+
+def _ensure_study_goal_columns():
+    inspector = inspect(engine)
+    if not inspector.has_table("study_goals"):
+        return
+
+    existing = {column["name"] for column in inspector.get_columns("study_goals")}
+    timestamp_type = "TIMESTAMP" if engine.dialect.name == "postgresql" else "DATETIME"
+    additions = []
+    if "goal_date" not in existing:
+        additions.append(("goal_date", "DATE NULL"))
+    if "position" not in existing:
+        additions.append(("position", "INTEGER NULL"))
+    if "completed_at" not in existing:
+        additions.append(("completed_at", f"{timestamp_type} NULL"))
+    if "updated_at" not in existing:
+        additions.append(("updated_at", f"{timestamp_type} NULL"))
+
+    with engine.begin() as connection:
+        for column_name, definition in additions:
+            connection.execute(text(f"ALTER TABLE study_goals ADD COLUMN {column_name} {definition}"))
+
+        if "goal_date" not in existing:
+            if engine.dialect.name == "postgresql":
+                connection.execute(
+                    text("UPDATE study_goals SET goal_date = COALESCE(due_date, created_at::date, CURRENT_DATE)")
+                )
+            else:
+                connection.execute(
+                    text("UPDATE study_goals SET goal_date = COALESCE(due_date, DATE(created_at), DATE('now'))")
+                )
+        if "position" not in existing:
+            connection.execute(text("UPDATE study_goals SET position = COALESCE(position, id, 0)"))
+        if "updated_at" not in existing:
+            connection.execute(text("UPDATE study_goals SET updated_at = COALESCE(created_at, CURRENT_TIMESTAMP)"))
+        connection.execute(text("UPDATE study_goals SET target_minutes = 5 WHERE target_minutes < 5"))
 
 
 def _seed_default_achievements():

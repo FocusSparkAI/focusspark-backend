@@ -60,17 +60,21 @@ class EmotionCreate(BaseModel):
 
 
 class StudyGoalCreate(BaseModel):
-    title: str
-    target_minutes: int = PydanticField(gt=0)
+    title: str = "Study"
+    target_minutes: int = PydanticField(ge=5)
     current_minutes: int = PydanticField(default=0, ge=0)
+    goal_date: Optional[date] = None
+    position: Optional[int] = None
     due_date: Optional[date] = None
 
 
 class StudyGoalUpdate(BaseModel):
     title: Optional[str] = None
-    target_minutes: Optional[int] = PydanticField(default=None, gt=0)
+    target_minutes: Optional[int] = PydanticField(default=None, ge=5)
     current_minutes: Optional[int] = PydanticField(default=None, ge=0)
     completed: Optional[bool] = None
+    goal_date: Optional[date] = None
+    position: Optional[int] = None
     due_date: Optional[date] = None
 
 
@@ -166,6 +170,97 @@ def _get_owned_goal(goal_id: int, user_id: int, db: Session) -> StudyGoal:
     if not study_goal or study_goal.user_id != user_id:
         raise HTTPException(status_code=404, detail="Study goal not found")
     return study_goal
+
+
+def _goal_day(goal: StudyGoal) -> date:
+    if getattr(goal, "goal_date", None):
+        return goal.goal_date
+    if goal.due_date:
+        return goal.due_date
+    return goal.created_at.date() if goal.created_at else datetime.utcnow().date()
+
+
+def _goal_sort_key(goal: StudyGoal):
+    return (goal.completed, _goal_day(goal), goal.position or 0, goal.id or 0)
+
+
+def _next_goal_position(user_id: int, goal_day: date, db: Session) -> int:
+    goals = db.exec(select(StudyGoal).where(StudyGoal.user_id == user_id)).all()
+    same_day_positions = [
+        int(goal.position or 0)
+        for goal in goals
+        if _goal_day(goal) == goal_day
+    ]
+    return (max(same_day_positions) + 1) if same_day_positions else 1
+
+
+def _sync_goal_completion(goal: StudyGoal, now: Optional[datetime] = None) -> None:
+    timestamp = now or datetime.utcnow()
+    goal.completed = goal.current_minutes >= goal.target_minutes
+    goal.completed_at = timestamp if goal.completed else None
+    goal.updated_at = timestamp
+
+
+def _allocate_session_minutes_to_goals(
+    user_id: int,
+    session_day: date,
+    minutes: int,
+    db: Session,
+) -> None:
+    remaining = max(0, minutes)
+    if remaining <= 0:
+        return
+
+    goals = db.exec(select(StudyGoal).where(StudyGoal.user_id == user_id)).all()
+    todays_goals = sorted(
+        [goal for goal in goals if _goal_day(goal) == session_day and not goal.completed],
+        key=lambda goal: (goal.position or 0, goal.id or 0),
+    )
+
+    now = datetime.utcnow()
+    for goal in todays_goals:
+        if remaining <= 0:
+            break
+
+        needed = max(0, goal.target_minutes - goal.current_minutes)
+        if needed <= 0:
+            _sync_goal_completion(goal, now)
+            db.add(goal)
+            continue
+
+        applied = min(needed, remaining)
+        goal.current_minutes += applied
+        remaining -= applied
+        _sync_goal_completion(goal, now)
+        db.add(goal)
+
+
+def _goals_for_day(user_id: int, goal_day: date, db: Session) -> list[StudyGoal]:
+    goals = db.exec(select(StudyGoal).where(StudyGoal.user_id == user_id)).all()
+    return sorted(
+        [goal for goal in goals if _goal_day(goal) == goal_day],
+        key=lambda goal: (goal.completed, goal.position or 0, goal.id or 0),
+    )
+
+
+def _goal_stats(goals: list[StudyGoal]) -> dict:
+    completed = [goal for goal in goals if goal.completed]
+    incomplete = [goal for goal in goals if not goal.completed]
+    total_target = sum(goal.target_minutes for goal in goals)
+    total_progress = sum(min(goal.current_minutes, goal.target_minutes) for goal in goals)
+    return {
+        "total": len(goals),
+        "completed": len(completed),
+        "incomplete": len(incomplete),
+        "target_minutes": total_target,
+        "progress_minutes": total_progress,
+        "completion_rate": round((len(completed) / len(goals)) * 100) if goals else 0,
+    }
+
+
+def _goals_between(user_id: int, start_day: date, end_day: date, db: Session) -> list[StudyGoal]:
+    goals = db.exec(select(StudyGoal).where(StudyGoal.user_id == user_id)).all()
+    return [goal for goal in goals if start_day <= _goal_day(goal) <= end_day]
 
 
 def _get_user_settings(user_id: int, db: Session) -> UserSettings:
@@ -563,6 +658,7 @@ def complete_study_session(
     user=Depends(get_current_user),
 ):
     study_session = _get_owned_session(session_id, user.id, db)
+    was_completed = study_session.completed
     study_session.ended_at = payload.ended_at or datetime.utcnow()
     study_session.actual_duration_minutes = payload.actual_duration_minutes
     if payload.distraction_count is not None:
@@ -570,6 +666,13 @@ def complete_study_session(
     study_session.completed = True
     if payload.notes is not None:
         study_session.notes = payload.notes
+    if not was_completed and study_session.session_type == "work":
+        _allocate_session_minutes_to_goals(
+            user.id,
+            study_session.started_at.date() if study_session.started_at else datetime.utcnow().date(),
+            _session_minutes(study_session),
+            db,
+        )
     _recalculate_user_progress(user, db)
     db.add(study_session)
     db.commit()
@@ -669,6 +772,8 @@ def productivity_summary(
 
     completed_sessions = [session for session in sessions if session.completed]
     recent_work_sessions = [session for session in completed_sessions if session.session_type == "work"]
+    goals = db.exec(select(StudyGoal).where(StudyGoal.user_id == user.id)).all()
+    goal_stats = _goal_stats(goals)
 
     total_work_minutes = sum(session.actual_duration_minutes or session.planned_duration_minutes for session in recent_work_sessions)
     total_distractions = sum(session.distraction_count for session in completed_sessions)
@@ -693,6 +798,10 @@ def productivity_summary(
         "average_focus": average_focus,
         "current_streak": int(getattr(user, "current_streak", 0) or 0),
         "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
+        "goals_total": goal_stats["total"],
+        "goals_completed": goal_stats["completed"],
+        "goals_incomplete": goal_stats["incomplete"],
+        "goal_completion_rate": goal_stats["completion_rate"],
     }
 
 
@@ -706,6 +815,9 @@ def analytics_insights(
     work_sessions = [session for session in completed if session.session_type == "work"]
     daily_focus = _daily_focus_rows(_sessions_for_recent_days(user.id, db, 7), 7)
     weekly_consistency = _weekly_consistency_rows(sessions, 4)
+    today = datetime.utcnow().date()
+    recent_goals = _goals_between(user.id, today - timedelta(days=27), today, db)
+    recent_goal_stats = _goal_stats(recent_goals)
 
     best_day = max(daily_focus, key=lambda item: (item["minutes"], item["focus_score"]), default=None)
     best_window = _best_study_window(work_sessions)
@@ -724,6 +836,12 @@ def analytics_insights(
         "average_focus": average_focus,
         "current_streak": int(getattr(user, "current_streak", 0) or 0),
         "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
+        "goals_total": recent_goal_stats["total"],
+        "goals_completed": recent_goal_stats["completed"],
+        "goals_incomplete": recent_goal_stats["incomplete"],
+        "goal_target_minutes": recent_goal_stats["target_minutes"],
+        "goal_progress_minutes": recent_goal_stats["progress_minutes"],
+        "goal_completion_rate": recent_goal_stats["completion_rate"],
         "daily_focus": daily_focus,
         "weekly_consistency": weekly_consistency,
         "best_focus_day": best_day,
@@ -752,6 +870,15 @@ def analytics_insights(
                 "value": f"{getattr(user, 'current_streak', 0) or 0} days",
                 "detail": "Current study streak",
             },
+            {
+                "title": "Goal completion",
+                "value": f"{recent_goal_stats['completion_rate']}%" if recent_goal_stats["total"] else None,
+                "detail": (
+                    f"{recent_goal_stats['completed']} completed, {recent_goal_stats['incomplete']} incomplete"
+                    if recent_goal_stats["total"]
+                    else "Create daily goals to track completion rate"
+                ),
+            },
         ],
     }
 
@@ -775,6 +902,10 @@ def dashboard_stats(
     achievements = _ordered_achievements(db)
     unlocked = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
     unlocked_achievement_ids = {item.achievement_id for item in unlocked}
+    today = datetime.utcnow().date()
+    today_goals = _goals_for_day(user.id, today, db)
+    active_goal = next((goal for goal in today_goals if not goal.completed), None)
+    today_goal_stats = _goal_stats(today_goals)
 
     recent_activity = [
         {
@@ -796,6 +927,9 @@ def dashboard_stats(
         "completed_sessions_this_week": len(completed),
         "daily_focus": _daily_focus_rows(sessions, 7),
         "recent_activity": recent_activity,
+        "today_goals": [goal.model_dump(mode="json") for goal in today_goals],
+        "active_goal": active_goal.model_dump(mode="json") if active_goal else None,
+        "today_goal_stats": today_goal_stats,
     }
 
 
@@ -805,12 +939,19 @@ def create_study_goal(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
+    goal_day = payload.goal_date or payload.due_date or datetime.utcnow().date()
+    current_minutes = min(payload.current_minutes, payload.target_minutes)
     study_goal = StudyGoal(
         user_id=user.id,
-        title=payload.title,
+        title=payload.title.strip() or "Study",
         target_minutes=payload.target_minutes,
-        current_minutes=payload.current_minutes,
-        due_date=payload.due_date,
+        current_minutes=current_minutes,
+        completed=current_minutes >= payload.target_minutes,
+        goal_date=goal_day,
+        position=payload.position or _next_goal_position(user.id, goal_day, db),
+        due_date=payload.due_date or goal_day,
+        completed_at=datetime.utcnow() if current_minutes >= payload.target_minutes else None,
+        updated_at=datetime.utcnow(),
     )
     db.add(study_goal)
     db.commit()
@@ -820,15 +961,14 @@ def create_study_goal(
 
 @router.get("/goals")
 def list_study_goals(
+    goal_date: Optional[date] = None,
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    goals = db.exec(
-        select(StudyGoal)
-        .where(StudyGoal.user_id == user.id)
-        .order_by(StudyGoal.completed.asc(), StudyGoal.due_date.asc(), StudyGoal.id.desc())
-    ).all()
-    return [goal.model_dump(mode="json") for goal in goals]
+    goals = db.exec(select(StudyGoal).where(StudyGoal.user_id == user.id)).all()
+    if goal_date is not None:
+        goals = [goal for goal in goals if _goal_day(goal) == goal_date]
+    return [goal.model_dump(mode="json") for goal in sorted(goals, key=_goal_sort_key)]
 
 
 @router.get("/goals/{goal_id}")
@@ -853,12 +993,21 @@ def update_study_goal(
         study_goal.title = payload.title
     if payload.target_minutes is not None:
         study_goal.target_minutes = payload.target_minutes
+        study_goal.current_minutes = min(study_goal.current_minutes, study_goal.target_minutes)
     if payload.current_minutes is not None:
-        study_goal.current_minutes = payload.current_minutes
+        study_goal.current_minutes = min(payload.current_minutes, study_goal.target_minutes)
     if payload.completed is not None:
         study_goal.completed = payload.completed
+        study_goal.completed_at = datetime.utcnow() if payload.completed else None
+    else:
+        _sync_goal_completion(study_goal)
+    if payload.goal_date is not None:
+        study_goal.goal_date = payload.goal_date
+    if payload.position is not None:
+        study_goal.position = payload.position
     if payload.due_date is not None:
         study_goal.due_date = payload.due_date
+    study_goal.updated_at = datetime.utcnow()
     db.add(study_goal)
     db.commit()
     db.refresh(study_goal)

@@ -58,8 +58,12 @@ class StudyGoal(SQLModel, table=True):
     target_minutes: int
     current_minutes: int = 0
     completed: bool = False
+    goal_date: date = Field(default_factory=date.today, index=True)
+    position: int = 0
     due_date: Optional[date] = None
+    completed_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class Achievement(SQLModel, table=True):
