@@ -1,0 +1,22 @@
+name: CD - Production
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types:
+      - completed
+    branches:
+      - main
+
+jobs:
+  deploy-production-job:
+    runs-on: ubuntu-latest
+    environment: production
+    if: github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Welcome To Production CD
+        run: echo "FocusSpark Backend is going to be deployed at Render.com"
+
+      - name: Deploy App
+        run: curl -X POST ${{ secrets.RENDER_CALLBACK_URL }}

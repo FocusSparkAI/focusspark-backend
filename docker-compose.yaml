@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pwd
+      POSTGRES_DB: focusspark
+    volumes:
+      - focusspark_db:/var/lib/postgresql/data
+    networks:
+      - focusspark_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d focusspark"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  adminer:
+    image: adminer
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "5555:8080"
+    networks:
+      - focusspark_network
+
+  backend:
+    build: .
+    env_file:
+      - .env.docker
+    ports:
+      - "8000:8000"
+    volumes:
+      - focusspark_uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - focusspark_network
+    restart: unless-stopped
+
+volumes:
+  focusspark_db:
+  focusspark_uploads:
+
+networks:
+  focusspark_network:

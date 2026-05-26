@@ -1,0 +1,65 @@
+name: CI Pipeline
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+
+jobs:
+  syntax-check-job:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.3"
+
+      - name: Check Python Syntax
+        run: python -m compileall app
+
+  image-build-job:
+    runs-on: ubuntu-latest
+    needs: syntax-check-job
+
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Build Docker Image
+        run: docker image build -t focusspark-backend:ci .
+
+      - name: List the Images
+        run: docker image ls
+
+  image-push-job:
+    runs-on: ubuntu-latest
+    needs: image-build-job
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Login To Dockerhub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build And Push Docker Image
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/focusspark-backend:latest

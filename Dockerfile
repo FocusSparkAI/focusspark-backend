@@ -1,23 +1,33 @@
-FROM python:3.11-slim
+FROM python:3.12.3-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
+# cd is same like WORKDIR
 WORKDIR /app
 
-# Install Python dependencies first so Docker can cache this layer.
-COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Linux libraries needed by OpenCV / MediaPipe
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the application source.
+# COPY source dest . or / same
+COPY requirements.txt .
+
+# Want to execute an instruction during build time
+RUN python -m pip install --upgrade pip \
+    && pip install -r requirements.txt
+
+# Copy this project backend app into the image
 COPY app ./app
-COPY alembic ./alembic
-COPY alembic.ini ./alembic.ini
-COPY README.md ./README.md
 
-# Create writable runtime directories.
-RUN mkdir -p uploads/avatars logs
+# Create runtime folders for uploads and logs
+RUN mkdir -p uploads logs
 
 EXPOSE 8000
 
+# Start FastAPI backend server
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
