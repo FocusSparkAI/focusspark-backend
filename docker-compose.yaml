@@ -36,8 +36,6 @@ services:
       - .env.docker
     ports:
       - "8000:8000"
-    volumes:
-      - focusspark_uploads:/app/uploads
     depends_on:
       db:
         condition: service_healthy
@@ -47,7 +45,6 @@ services:
 
 volumes:
   focusspark_db:
-  focusspark_uploads:
 
 networks:
   focusspark_network:
