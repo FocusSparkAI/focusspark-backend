@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field as PydanticField
@@ -17,6 +17,7 @@ from app.services.flashcard_service import (
     create_flashcards_from_chat
 )
 from app.utils.auth import get_current_user
+from app.utils.timezone import utc_now
 
 
 router = APIRouter(prefix="/flashcards", tags=["Flashcards"])
@@ -144,7 +145,7 @@ def upsert_flashcard_review(
         )
     ).first()
 
-    now = datetime.utcnow()
+    now = utc_now()
     if review is None:
         review = FlashcardReview(
             user_id=user.id,

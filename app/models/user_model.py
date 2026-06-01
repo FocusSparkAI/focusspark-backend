@@ -26,6 +26,7 @@ class User(SQLModel, table=True):
     full_name: str = Field(max_length=255)
     bio: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
     avatar_url: Optional[str] = Field(default=None, max_length=1024)
+    avatar_public_id: Optional[str] = Field(default=None, max_length=255)
     current_streak: int = 0
     longest_streak: int = 0
     total_focus_minutes: int = 0
@@ -33,6 +34,7 @@ class User(SQLModel, table=True):
     preferred_break_duration: int = 5
     academic_focus: AcademicFocus
     accepted_terms: bool = Field(default=False)
+    timezone: str = Field(default="UTC", max_length=100)
     last_login: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

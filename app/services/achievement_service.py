@@ -7,12 +7,13 @@ from app.models.flashcard_model import FlashcardDeck
 from app.models.productivity_model import Achievement, Notification, StudySession, UserAchievement
 from app.models.quiz_model import Quiz
 from app.models.user_model import User
+from app.utils.timezone import utc_now, user_local_date, user_local_hour
 
 
 def _achievement_window_start(achievement: Achievement) -> datetime | None:
     if achievement.criteria_window_days is None:
         return None
-    return datetime.utcnow() - timedelta(days=achievement.criteria_window_days)
+    return utc_now() - timedelta(days=achievement.criteria_window_days)
 
 
 def _session_minutes(session: StudySession) -> int:
@@ -61,15 +62,15 @@ def compute_achievement_progress(
             else 0
         )
     elif metric == "early_sessions":
-        current = sum(1 for session in sessions if session.started_at and session.started_at.hour < 7)
+        current = sum(1 for session in sessions if session.started_at and user_local_hour(session.started_at, user) < 7)
     elif metric == "late_sessions":
-        current = sum(1 for session in sessions if session.started_at and session.started_at.hour == 0)
+        current = sum(1 for session in sessions if session.started_at and user_local_hour(session.started_at, user) == 0)
     elif metric == "daily_sessions":
         counts: dict[date, int] = {}
         for session in sessions:
             if not session.completed or not session.started_at:
                 continue
-            session_date = session.started_at.date()
+            session_date = user_local_date(session.started_at, user)
             counts[session_date] = counts.get(session_date, 0) + 1
         current = max(counts.values(), default=0)
     elif metric == "documents_uploaded":

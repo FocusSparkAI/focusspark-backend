@@ -1,18 +1,18 @@
 from pathlib import Path
-from uuid import uuid4
 from io import BytesIO
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlmodel import Session, select
-from datetime import datetime
 
 from app.schemas.user_schema import UserSignup, UserLogin, UserPasswordUpdate, UserProfile, UserProfileUpdate
 from app.db.database import get_session
 from app.models.productivity_model import Achievement, Notification, UserAchievement
 from app.services.auth_service import create_user, authenticate_user, delete_user_by_id, expire_access_token
+from app.services.avatar_storage_service import delete_avatar, upload_avatar
 from app.utils.auth import get_current_user, oauth2_scheme
 from app.utils.hashing import hash_password, verify_password
 from app.utils.jwt_handler import create_access_token
+from app.utils.timezone import normalize_timezone, utc_now
 from PIL import Image, UnidentifiedImageError
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -24,6 +24,28 @@ AVATAR_OUTPUT_SIZE = 256  # final square size (pixels)
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 
 
+def _delete_local_avatar_file(avatar: str | None) -> None:
+    """Delete a local avatar file if it points inside uploads/avatars."""
+    if not avatar:
+        return
+
+    try:
+        if not isinstance(avatar, str) or not (avatar.startswith("/uploads/") or avatar.startswith("uploads/")):
+            return
+
+        target = Path(avatar.lstrip("/"))
+        uploads_dir = (Path("uploads") / "avatars").resolve()
+        try:
+            resolved = target.resolve()
+        except Exception:
+            resolved = (Path.cwd() / target).resolve()
+
+        if resolved.is_relative_to(uploads_dir) and resolved.exists() and resolved.is_file():
+            resolved.unlink()
+    except Exception:
+        pass
+
+
 def _profile_response(user) -> UserProfile:
     return UserProfile(
         id=user.id,
@@ -32,6 +54,7 @@ def _profile_response(user) -> UserProfile:
         academic_focus=user.academic_focus,
         bio=user.bio,
         avatar_url=user.avatar_url,
+        timezone=normalize_timezone(getattr(user, "timezone", None)),
         last_login=user.last_login,
         created_at=user.created_at,
     )
@@ -110,8 +133,8 @@ def login(user: UserLogin, session: Session = Depends(get_session)):
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    db_user.last_login = datetime.utcnow()
-    db_user.updated_at = datetime.utcnow()
+    db_user.last_login = utc_now()
+    db_user.updated_at = utc_now()
     session.add(db_user)
     session.commit()
     session.refresh(db_user)
@@ -136,7 +159,7 @@ def change_password(
         raise HTTPException(status_code=400, detail="New password must be different from current password")
 
     user.password = hash_password(payload.new_password)
-    user.updated_at = datetime.utcnow()
+    user.updated_at = utc_now()
     session.add(user)
     session.commit()
 
@@ -168,8 +191,10 @@ def update_profile(
         user.bio = payload.bio.strip() or None
     if payload.avatar_url is not None:
         user.avatar_url = payload.avatar_url.strip() or None
+    if payload.timezone is not None:
+        user.timezone = normalize_timezone(payload.timezone)
 
-    user.updated_at = datetime.utcnow()
+    user.updated_at = utc_now()
     session.add(user)
     session.commit()
     session.refresh(user)
@@ -234,12 +259,7 @@ async def upload_profile_avatar(
     format_map = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".gif": "GIF", ".webp": "WEBP"}
     out_format = format_map.get(extension, "PNG")
 
-    uploads_dir = Path("uploads") / "avatars"
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    avatar_filename = f"user-{user.id}-{uuid4().hex}{extension}"
-    avatar_path = uploads_dir / avatar_filename
-
-    # Save processed image to bytes and then write to disk
+    # Save processed image to bytes before uploading to Cloudinary
     out_buffer = BytesIO()
     save_params = {"format": out_format}
     if out_format == "JPEG":
@@ -254,14 +274,21 @@ async def upload_profile_avatar(
     if len(avatar_bytes) > MAX_AVATAR_SIZE:
         raise HTTPException(status_code=400, detail="Processed avatar exceeds size limit")
 
-    avatar_path.write_bytes(avatar_bytes)
+    old_avatar_url = user.avatar_url
+    old_avatar_public_id = getattr(user, "avatar_public_id", None)
+
+    uploaded_avatar = upload_avatar(user.id, avatar_bytes, AVATAR_OUTPUT_SIZE)
 
     # Persist URL to DB
-    user.avatar_url = f"/uploads/avatars/{avatar_filename}"
-    user.updated_at = datetime.utcnow()
+    user.avatar_url = uploaded_avatar.url
+    user.avatar_public_id = uploaded_avatar.public_id
+    user.updated_at = utc_now()
     session.add(user)
     session.commit()
     session.refresh(user)
+    _delete_local_avatar_file(old_avatar_url)
+    if old_avatar_public_id and old_avatar_public_id != uploaded_avatar.public_id:
+        delete_avatar(old_avatar_public_id)
 
     return _profile_response(user)
 
@@ -273,39 +300,18 @@ def remove_profile_avatar(session: Session = Depends(get_session), user=Depends(
         raise HTTPException(status_code=500, detail="User record is invalid")
 
     avatar = user.avatar_url
+    avatar_public_id = getattr(user, "avatar_public_id", None)
     # If there's no avatar set, return 404
-    if not avatar:
+    if not avatar and not avatar_public_id:
         raise HTTPException(status_code=404, detail="No avatar to remove")
 
-    # Attempt to remove local file if it's in our uploads directory
-    try:
-        # Only attempt to delete if the avatar URL points to our uploads folder
-        if isinstance(avatar, str) and (avatar.startswith("/uploads/") or avatar.startswith("uploads/")):
-            # Support leading slash or not
-            rel_path = avatar.lstrip("/")
-            target = Path(rel_path)
-            uploads_dir = (Path("uploads") / "avatars").resolve()
-            try:
-                resolved = target.resolve()
-            except Exception:
-                # If resolution fails, build absolute from cwd
-                resolved = (Path.cwd() / target).resolve()
-
-            # Safety check: ensure target is inside uploads/avatars
-            if str(resolved).startswith(str(uploads_dir)):
-                if resolved.exists() and resolved.is_file():
-                    try:
-                        resolved.unlink()
-                    except Exception:
-                        # ignore deletion errors
-                        pass
-    except Exception:
-        # Don't fail the operation if file deletion has unexpected errors
-        pass
+    _delete_local_avatar_file(avatar)
+    delete_avatar(avatar_public_id)
 
     # Clear DB field and commit
     user.avatar_url = None
-    user.updated_at = datetime.utcnow()
+    user.avatar_public_id = None
+    user.updated_at = utc_now()
     session.add(user)
     session.commit()
     session.refresh(user)
