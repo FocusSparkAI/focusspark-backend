@@ -1,50 +1,57 @@
 # FocusSpark Backend
 
-FocusSpark Backend is the FastAPI service for the FocusSpark study platform. It handles authentication, profiles, AI study tools, focus analysis, study tracking, achievements, notifications, settings, analytics, and exports.
+FastAPI backend for FocusSpark, an AI-assisted study platform for focus tracking, Pomodoro study sessions, analytics, achievements, quizzes, flashcards, document chat, and user profiles.
+
+This service powers both the web frontend and the Chrome extension.
 
 ## Tech Stack
 
-- FastAPI
+- FastAPI and Uvicorn
 - SQLModel / SQLAlchemy
 - PostgreSQL
-- JWT auth with `python-jose`
-- Bcrypt password hashing
-- OpenAI / GitHub Models provider support
-- Gemini provider support
-- OpenCV, MediaPipe, and DeepFace for focus/emotion analysis
-- Request logging middleware with optional rotating file logs
+- JWT authentication with `python-jose`
+- Password hashing with Bcrypt / Passlib
+- OpenAI-compatible GitHub Models provider
+- Gemini provider
+- OpenCV, MediaPipe, Pillow, and DeepFace for focus/emotion and image handling
+- Cloudinary for hosted profile pictures
 - Docker and Docker Compose for local container testing
-- Uvicorn
 
 ## Features
 
-- JWT signup/login with secure password hashing
-- Profile API with bio, avatar URL, avatar upload/delete, academic focus, password changes, and last-login tracking
-- AI chat threads, regular chat, document chat, and generated artifacts
-- AI flashcard and quiz generation from topics or chat messages
+- Signup, login, JWT protected routes, password changes, and logout-token expiry
+- Profile management with name, academic focus, bio, timezone, last login, and profile picture upload/delete
+- Cloudinary-backed avatar storage with image validation, crop/resize processing, overwrite support, and old-avatar cleanup
+- AI chat threads, document chat, and generated artifacts
+- AI-generated flashcards and quizzes from topics or chat messages
+- Quiz attempts, scoring, history, and answer tracking
 - Flashcard review tracking
-- Quiz attempts, scoring, and attempt history
-- Single-frame and WebSocket focus/emotion detection
-- Study sessions, goals, analytics, dashboard stats, and reports data
+- Single-frame and WebSocket focus/emotion analysis
+- Study sessions, distractions, emotion logs, goals, dashboard stats, analytics, and reports data
 - Achievements, user progress, manual unlock support, and achievement notifications
-- Notifications and mark-read APIs
-- User settings for theme, Pomodoro durations, AI model preferences, focus preferences, extension notifications, and accessibility extras
-- Backend JSON/CSV study data export
-- Account data clearing
+- Notifications and read-state APIs
+- User settings for theme, Pomodoro timings, AI preferences, focus preferences, extension notifications, accessibility, privacy, and appearance
+- JSON/CSV export and account data clearing
 
 ## Environment
 
-Create `.env` in the backend project root for normal local development:
+Create `.env` in `FocusSpark-Backend/`.
 
 ```env
 DATABASE_URL=postgresql+psycopg2://postgres:password@127.0.0.1:5432/focusspark
 JWT_SECRET=your-32-character-secret-key-here
+
 AI_PROVIDER=openai
 GITHUB_MODEL=gpt-4.1
 GITHUB_TOKEN=github_pat_xxxxx
 GITHUB_MODELS_ENDPOINT=https://models.inference.ai.azure.com
 AI_TEMPERATURE=0.7
 AI_MAX_TOKENS=1000
+
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-api-key
+CLOUDINARY_API_SECRET=your-api-secret
+
 CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
 LOG_LEVEL=INFO
 LOG_TO_FILE=true
@@ -54,7 +61,7 @@ LOG_BACKUP_COUNT=5
 SQL_ECHO=false
 ```
 
-Gemini can be used instead of the OpenAI-compatible GitHub Models provider:
+To use Gemini instead of the OpenAI-compatible provider:
 
 ```env
 AI_PROVIDER=gemini
@@ -62,7 +69,7 @@ GOOGLE_API_KEY=your-google-api-key
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-## Install and Run
+## Install And Run
 
 ```bash
 python -m venv venv
@@ -71,69 +78,68 @@ pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Access:
+Local URLs:
 
 - API: `http://127.0.0.1:8000/`
 - Swagger UI: `http://127.0.0.1:8000/docs`
 - ReDoc: `http://127.0.0.1:8000/redoc`
 
+Health check:
+
+- `GET /` returns `{"message": "FocusSpark Backend Running"}`
+
 ## Docker
 
-The `Dockerfile` builds the FastAPI backend image and runs:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-Build and run only the backend image:
+Build and run the backend image:
 
 ```bash
 docker build -t focusspark-backend .
 docker run --env-file .env -p 8000:8000 focusspark-backend
 ```
 
-If PostgreSQL is running directly on your Windows host machine, use `host.docker.internal` in the container database URL:
+If PostgreSQL is running on the Windows host, use `host.docker.internal`:
 
 ```env
 DATABASE_URL=postgresql+psycopg2://postgres:password@host.docker.internal:5432/focusspark
 ```
 
-## Docker Compose Local Testing
+## Docker Compose
 
-`docker-compose.yaml` is for local testing with three services:
+`docker-compose.yaml` runs:
 
-- `backend`: this FastAPI app
-- `db`: local PostgreSQL container
+- `backend`: FastAPI app
+- `db`: PostgreSQL
 - `adminer`: database UI
-
-`.env.docker` is the environment file used by the backend container when running with Compose. It is ignored by git because it can contain secrets. Use `.env.docker.example` as the template.
 
 Create `.env.docker`:
 
 ```env
 DATABASE_URL=postgresql+psycopg2://postgres:pwd@db:5432/focusspark
 JWT_SECRET=your-local-secret-key
+CLOUDINARY_CLOUD_NAME=your-cloud-name
+CLOUDINARY_API_KEY=your-api-key
+CLOUDINARY_API_SECRET=your-api-secret
 ```
 
-Run locally:
+Run:
 
 ```bash
 docker compose up --build
 ```
 
-Stop containers:
+Stop:
 
 ```bash
 docker compose down
 ```
 
-Remove containers and the local database volume:
+Stop and remove the local database volume:
 
 ```bash
 docker compose down -v
 ```
 
-Local URLs:
+Local Compose URLs:
 
 - Backend: `http://localhost:8000`
 - Swagger UI: `http://localhost:8000/docs`
@@ -149,7 +155,7 @@ Password: pwd
 Database: focusspark
 ```
 
-When switching to Neon, keep the Compose file for local testing and change only `DATABASE_URL` in the environment used by the backend:
+For Neon or another hosted PostgreSQL database, keep the Compose file for local testing and update only `DATABASE_URL`:
 
 ```env
 DATABASE_URL=postgresql+psycopg2://USER:PASSWORD@HOST/neondb?sslmode=require
@@ -163,7 +169,18 @@ Protected routes require:
 Authorization: Bearer <token>
 ```
 
-### Sign Up
+Main auth/profile routes:
+
+- `POST /auth/signup`
+- `POST /auth/login`
+- `PATCH /auth/password`
+- `GET /auth/profile`
+- `PATCH /auth/profile`
+- `POST /auth/profile/avatar`
+- `DELETE /auth/profile/avatar`
+- `DELETE /auth/delete-user`
+
+Signup example:
 
 ```http
 POST /auth/signup
@@ -180,20 +197,7 @@ POST /auth/signup
 }
 ```
 
-Academic focus values:
-
-- Computer Science
-- Medicine
-- Engineering
-- Business
-- Law
-- Psychology
-- Biology
-- Mathematics
-- Physics
-- Other
-
-### Login
+Login example:
 
 ```http
 POST /auth/login
@@ -206,15 +210,11 @@ POST /auth/login
 }
 ```
 
-Successful login updates `users.last_login` and returns an access token.
-
-### Profile
+Profile example:
 
 ```http
 GET /auth/profile
 ```
-
-Example response:
 
 ```json
 {
@@ -223,24 +223,30 @@ Example response:
   "email": "john@example.com",
   "academic_focus": "Computer Science",
   "bio": null,
-  "avatar_url": null,
+  "avatar_url": "https://res.cloudinary.com/example/image/upload/...",
+  "timezone": "Asia/Karachi",
   "last_login": "2026-05-25T04:30:00",
   "created_at": "2026-05-10T14:30:00"
 }
 ```
 
-Auth/profile routes:
+## Profile Pictures
 
-- `POST /auth/signup`
-- `POST /auth/login`
-- `PATCH /auth/password`
-- `GET /auth/profile`
-- `PATCH /auth/profile`
-- `POST /auth/profile/avatar`
-- `DELETE /auth/profile/avatar`
-- `DELETE /auth/delete-user`
+`POST /auth/profile/avatar` accepts an authenticated multipart image upload.
 
-Avatar uploads accept image files, validate content, resize/crop to a square image, save under `uploads/avatars`, and serve files through `/uploads`.
+Validation and processing:
+
+- Accepts image content types only
+- Rejects empty files
+- Rejects files larger than 2 MB
+- Allows `.jpg`, `.jpeg`, `.png`, `.gif`, and `.webp`
+- Limits source dimensions to 1024 px
+- Center-crops to square and resizes to 256 x 256
+- Uploads to Cloudinary under `focusspark/avatars`
+- Uses `user-{user_id}` as the public ID and overwrites the previous image
+- Stores `avatar_url` and `avatar_public_id` on the user
+
+`DELETE /auth/profile/avatar` removes the Cloudinary asset when possible and clears the database fields. The backend also keeps compatibility cleanup for old local `/uploads/avatars` profile images.
 
 ## Study Routes
 
@@ -287,33 +293,13 @@ Settings and exports:
 - `GET /study/export?format=csv`
 - `DELETE /study/data`
 
-`GET /study/export` also supports optional `start_date` and `end_date` filters.
+`GET /study/export` supports optional `start_date` and `end_date` filters.
 
-## User Settings
+Example:
 
 ```http
-GET /study/settings
-PUT /study/settings
+GET /study/export?format=json&start_date=2026-04-15&end_date=2026-06-01
 ```
-
-Settings include:
-
-- `dark_mode`
-- `pomodoro_duration_minutes`
-- `break_duration_minutes`
-- `ai_persona`
-- `preferred_ai_provider`
-- `preferred_ai_model`
-- `focus_sensitivity`
-- `fallback_method`
-- `notifications_enabled`
-- `focus_alerts_enabled`
-- `integrations`
-- `appearance`
-- `accessibility`
-- `privacy`
-
-The web settings page uses `notifications_enabled` as the "Extension Notifications" preference. The extension bell dropdown reads this setting and shows "Notifications off" when it is disabled.
 
 ## AI Study Routes
 
@@ -348,7 +334,7 @@ Quizzes:
 
 ## Focus Analysis
 
-Single frame:
+Single-frame analysis:
 
 ```http
 POST /analyze
@@ -360,7 +346,7 @@ WebSocket stream:
 WS /ws?token=<access_token>
 ```
 
-Expected payload:
+Expected image payload:
 
 ```json
 {
@@ -400,17 +386,23 @@ Current implemented tables include:
 - notifications
 - user_settings
 
-`init_db()` creates missing tables, seeds default achievements, and adds selected compatibility columns for existing tables.
+`init_db()` creates missing tables, seeds default achievements, and adds selected compatibility columns for existing tables, including profile/avatar-related columns.
+
+## Useful Commands
+
+```bash
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+python -m compileall app
+```
 
 ## Development Notes
 
 - No trailing slash is required on routes.
 - Timestamps are returned in ISO 8601 format.
 - CORS is open for development and can be configured with `CORS_ORIGINS`.
-- Request logs are written through `RequestLoggingMiddleware`; file logging writes to `logs/app.log` by default.
-- Uploaded profile/avatar files are served from `/uploads`.
-- Achievement defaults are seeded on DB init.
+- Request logs are written through `RequestLoggingMiddleware`.
+- Cloudinary is required for new profile-picture uploads.
+- Old local profile-picture paths are still cleaned up during avatar replacement/removal.
+- Achievement defaults are seeded on database initialization.
 - IDs are integer-based in the current SQLModel implementation.
-- `.env`, `.env.*`, logs, uploads, virtual environments, and cache folders are ignored by git.
-- `.dockerignore` keeps secrets and local-only files out of Docker build context.
-- The backend is aligned with the current web frontend and extension flow, while a future UUID schema update may still be needed if you want the schema to match a UUID-first final design.
+- `.env`, `.env.*`, logs, uploads, virtual environments, and cache folders should stay out of git.

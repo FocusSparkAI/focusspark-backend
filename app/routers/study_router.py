@@ -543,6 +543,18 @@ def _records_to_dict(records: list) -> list[dict]:
     return [record.model_dump(mode="json") for record in records]
 
 
+def _dedupe_notifications(notifications: list[Notification]) -> list[Notification]:
+    seen = set()
+    unique_notifications = []
+    for notification in notifications:
+        key = (notification.type, notification.title, notification.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_notifications.append(notification)
+    return unique_notifications
+
+
 def _export_user_profile(user) -> dict:
     profile = user.model_dump(mode="json")
     profile.pop("password", None)
@@ -1147,7 +1159,7 @@ def list_notifications(
     if limit is not None:
         statement = statement.limit(limit)
 
-    notifications = db.exec(statement).all()
+    notifications = _dedupe_notifications(db.exec(statement).all())
     return [notification.model_dump(mode="json") for notification in notifications]
 
 

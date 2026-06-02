@@ -111,17 +111,6 @@ def award_earned_achievements(user, db: Session) -> list[Notification]:
 
         achievement_message = f"You unlocked {achievement.title}."
         if achievement.id in existing_ids:
-            if achievement_message not in existing_notification_messages:
-                notification = Notification(
-                    user_id=user.id,
-                    type="achievement",
-                    title="Achievement unlocked",
-                    message=achievement_message,
-                )
-                db.add(notification)
-                created_notifications.append(notification)
-                existing_notification_messages.add(achievement_message)
-                changed = True
             continue
 
         current, target = compute_achievement_progress(achievement, user, db)
