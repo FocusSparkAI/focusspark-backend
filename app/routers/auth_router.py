@@ -4,10 +4,33 @@ from io import BytesIO
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlmodel import Session, select
 
-from app.schemas.user_schema import UserSignup, UserLogin, UserPasswordUpdate, UserProfile, UserProfileUpdate
+from app.schemas.user_schema import (
+    ForgotPasswordRequest,
+    ResendVerificationOtpRequest,
+    ResetPasswordRequest,
+    UserSignup,
+    UserLogin,
+    UserPasswordUpdate,
+    UserProfile,
+    UserProfileUpdate,
+    VerifyPasswordResetOtpRequest,
+    VerifyEmailRequest,
+)
 from app.db.database import get_session
 from app.models.productivity_model import Achievement, Notification, UserAchievement
-from app.services.auth_service import create_user, authenticate_user, delete_user_by_id, expire_access_token
+from app.models.user_model import User
+from app.services.auth_service import (
+    authenticate_user,
+    create_user,
+    delete_user_by_id,
+    expire_access_token,
+    issue_email_verification_otp,
+    issue_password_reset_otp,
+    reset_password_with_otp,
+    verify_email_otp,
+    verify_password_reset_otp,
+)
+from app.services.email_service import send_password_changed_email, send_welcome_email
 from app.services.avatar_storage_service import delete_avatar, upload_avatar
 from app.utils.auth import get_current_user, oauth2_scheme
 from app.utils.hashing import hash_password, verify_password
@@ -112,16 +135,79 @@ def _unlock_account_created_achievement(user_id: int, session: Session) -> None:
 def signup(user: UserSignup, session: Session = Depends(get_session)):
     try:
         new_user = create_user(user, session)
-        if new_user.id is not None:
-            _unlock_account_created_achievement(new_user.id, session)
-            session.commit()
-        token = create_access_token({"user_id": new_user.id})
+        issue_email_verification_otp(new_user, session)
         return {
-            "message": "User created successfully",
+            "message": "Account created. Please verify your email",
             "user_id": new_user.id,
+            "email": new_user.email,
+            "requires_email_verification": True,
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/verify-email")
+def verify_email(payload: VerifyEmailRequest, session: Session = Depends(get_session)):
+    try:
+        user = verify_email_otp(payload.email, payload.otp, session)
+        if user.id is None:
+            raise HTTPException(status_code=500, detail="User record is invalid")
+        _unlock_account_created_achievement(user.id, session)
+        session.commit()
+        token = create_access_token({"user_id": user.id})
+        send_welcome_email(user.email, user.full_name)
+        return {
+            "message": "Email verified successfully",
+            "user_id": user.id,
             "token_type": "bearer",
             "access_token": token,
         }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/resend-verification-otp")
+def resend_verification_otp(payload: ResendVerificationOtpRequest, session: Session = Depends(get_session)):
+    statement = select(User).where(User.email == payload.email)
+    user = session.exec(statement).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="No signup verification found for this email")
+    if user.is_email_verified:
+        raise HTTPException(status_code=400, detail="Email is already verified")
+
+    issue_email_verification_otp(user, session)
+    return {"message": "Verification code sent"}
+
+
+@router.post("/forgot-password")
+def forgot_password(payload: ForgotPasswordRequest, session: Session = Depends(get_session)):
+    try:
+        issue_password_reset_otp(payload.email, session)
+        return {"message": "Password reset code sent"}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/verify-password-reset-otp")
+def verify_password_reset_code(payload: VerifyPasswordResetOtpRequest, session: Session = Depends(get_session)):
+    try:
+        verify_password_reset_otp(payload.email, payload.otp, session)
+        return {"message": "Password reset code verified"}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/reset-password")
+def reset_password(payload: ResetPasswordRequest, session: Session = Depends(get_session)):
+    try:
+        reset_password_with_otp(
+            payload.email,
+            payload.otp,
+            payload.new_password,
+            payload.confirm_password,
+            session,
+        )
+        return {"message": "Password updated successfully"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -132,6 +218,8 @@ def login(user: UserLogin, session: Session = Depends(get_session)):
     db_user = authenticate_user(user, session)
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    if not db_user.is_email_verified:
+        raise HTTPException(status_code=403, detail="Please verify your email before signing in")
 
     db_user.last_login = utc_now()
     db_user.updated_at = utc_now()
@@ -162,6 +250,8 @@ def change_password(
     user.updated_at = utc_now()
     session.add(user)
     session.commit()
+    session.refresh(user)
+    send_password_changed_email(user.email, user.full_name)
 
     return {"message": "Password updated successfully"}
 

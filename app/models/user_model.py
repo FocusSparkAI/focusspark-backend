@@ -34,6 +34,13 @@ class User(SQLModel, table=True):
     preferred_break_duration: int = 5
     academic_focus: AcademicFocus
     accepted_terms: bool = Field(default=False)
+    is_email_verified: bool = Field(default=False)
+    email_verification_otp_hash: Optional[str] = Field(default=None, max_length=64)
+    email_verification_expires_at: Optional[datetime] = None
+    email_verification_sent_at: Optional[datetime] = None
+    password_reset_otp_hash: Optional[str] = Field(default=None, max_length=64)
+    password_reset_expires_at: Optional[datetime] = None
+    password_reset_sent_at: Optional[datetime] = None
     timezone: str = Field(default="UTC", max_length=100)
     last_login: Optional[datetime] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
