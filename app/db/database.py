@@ -54,6 +54,20 @@ def _ensure_user_profile_columns():
         additions.append(("updated_at", f"{timestamp_type} NULL"))
     if "last_login" not in existing:
         additions.append(("last_login", f"{timestamp_type} NULL"))
+    if "is_email_verified" not in existing:
+        additions.append(("is_email_verified", "BOOLEAN NOT NULL DEFAULT FALSE"))
+    if "email_verification_otp_hash" not in existing:
+        additions.append(("email_verification_otp_hash", "VARCHAR(64) NULL"))
+    if "email_verification_expires_at" not in existing:
+        additions.append(("email_verification_expires_at", f"{timestamp_type} NULL"))
+    if "email_verification_sent_at" not in existing:
+        additions.append(("email_verification_sent_at", f"{timestamp_type} NULL"))
+    if "password_reset_otp_hash" not in existing:
+        additions.append(("password_reset_otp_hash", "VARCHAR(64) NULL"))
+    if "password_reset_expires_at" not in existing:
+        additions.append(("password_reset_expires_at", f"{timestamp_type} NULL"))
+    if "password_reset_sent_at" not in existing:
+        additions.append(("password_reset_sent_at", f"{timestamp_type} NULL"))
 
     if not additions:
         return

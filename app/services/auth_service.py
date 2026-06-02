@@ -1,3 +1,5 @@
+import secrets
+from datetime import timedelta
 from hashlib import sha256
 
 from sqlmodel import Session, select
@@ -16,6 +18,12 @@ from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQues
 from app.models.token_model import ExpiredToken
 from app.models.user_model import User
 from app.schemas.user_schema import UserSignup, UserLogin
+from app.core.config import EMAIL_VERIFICATION_OTP_MINUTES, PASSWORD_RESET_OTP_MINUTES
+from app.services.email_service import (
+    send_password_changed_email,
+    send_password_reset_otp_email,
+    send_verification_otp_email,
+)
 from app.utils.hashing import hash_password, verify_password
 from app.utils.jwt_handler import get_token_expiration
 from app.utils.timezone import normalize_timezone, utc_now
@@ -25,16 +33,115 @@ def _token_hash(token: str) -> str:
     return sha256(token.encode("utf-8")).hexdigest()
 
 
+def _otp_hash(email: str, otp: str) -> str:
+    return sha256(f"{email.lower()}:{otp}".encode("utf-8")).hexdigest()
+
+
+def _password_meets_requirements(password: str) -> bool:
+    return len(password) >= 8 and any(char.isalpha() for char in password) and any(char.isdigit() for char in password)
+
+
+def issue_email_verification_otp(user: User, session: Session) -> str:
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    now = utc_now()
+    user.email_verification_otp_hash = _otp_hash(user.email, otp)
+    user.email_verification_expires_at = now + timedelta(minutes=EMAIL_VERIFICATION_OTP_MINUTES)
+    user.email_verification_sent_at = now
+    user.updated_at = now
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    send_verification_otp_email(user.email, user.full_name, otp, EMAIL_VERIFICATION_OTP_MINUTES)
+    return otp
+
+
+def verify_email_otp(email: str, otp: str, session: Session):
+    statement = select(User).where(User.email == email)
+    user = session.exec(statement).first()
+    if not user:
+        raise ValueError("No signup verification found for this email")
+    if user.is_email_verified:
+        raise ValueError("Email is already verified")
+    if not user.email_verification_otp_hash or not user.email_verification_expires_at:
+        raise ValueError("Verification code has not been requested")
+    if user.email_verification_expires_at < utc_now():
+        raise ValueError("Verification code expired. Please request a new code")
+    if user.email_verification_otp_hash != _otp_hash(user.email, otp.strip()):
+        raise ValueError("Invalid verification code")
+
+    user.is_email_verified = True
+    user.email_verification_otp_hash = None
+    user.email_verification_expires_at = None
+    user.email_verification_sent_at = None
+    user.updated_at = utc_now()
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
+
+
+def issue_password_reset_otp(email: str, session: Session):
+    statement = select(User).where(User.email == email)
+    user = session.exec(statement).first()
+    if not user:
+        raise ValueError("No account found with this email")
+
+    otp = f"{secrets.randbelow(1_000_000):06d}"
+    now = utc_now()
+    user.password_reset_otp_hash = _otp_hash(user.email, otp)
+    user.password_reset_expires_at = now + timedelta(minutes=PASSWORD_RESET_OTP_MINUTES)
+    user.password_reset_sent_at = now
+    user.updated_at = now
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    send_password_reset_otp_email(user.email, user.full_name, otp, PASSWORD_RESET_OTP_MINUTES)
+    return user
+
+
+def verify_password_reset_otp(email: str, otp: str, session: Session):
+    statement = select(User).where(User.email == email)
+    user = session.exec(statement).first()
+    if not user:
+        raise ValueError("No password reset request found for this email")
+    if not user.password_reset_otp_hash or not user.password_reset_expires_at:
+        raise ValueError("Password reset code has not been requested")
+    if user.password_reset_expires_at < utc_now():
+        raise ValueError("Password reset code expired. Please request a new code")
+    if user.password_reset_otp_hash != _otp_hash(user.email, otp.strip()):
+        raise ValueError("Invalid password reset code")
+
+    return user
+
+
+def reset_password_with_otp(email: str, otp: str, new_password: str, confirm_password: str, session: Session):
+    if new_password != confirm_password:
+        raise ValueError("New passwords do not match")
+    if not _password_meets_requirements(new_password):
+        raise ValueError("Password must be at least 8 characters, including a letter and a number")
+
+    user = verify_password_reset_otp(email, otp, session)
+    if verify_password(new_password, user.password):
+        raise ValueError("New password must be different from current password")
+
+    user.password = hash_password(new_password)
+    user.password_reset_otp_hash = None
+    user.password_reset_expires_at = None
+    user.password_reset_sent_at = None
+    user.updated_at = utc_now()
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    send_password_changed_email(user.email, user.full_name)
+    return user
+
+
 def create_user(user_data: UserSignup, session: Session):
     # check password match
     if user_data.password != user_data.confirm_password:
         raise ValueError("Passwords do not match")
 
-    if (
-        len(user_data.password) < 8
-        or not any(char.isalpha() for char in user_data.password)
-        or not any(char.isdigit() for char in user_data.password)
-    ):
+    if not _password_meets_requirements(user_data.password):
         raise ValueError("Password must be at least 8 characters, including a letter and a number")
     
     # check terms acceptance
@@ -53,6 +160,7 @@ def create_user(user_data: UserSignup, session: Session):
         password=hash_password(user_data.password),
         academic_focus=user_data.academic_focus,
         accepted_terms=user_data.accepted_terms,
+        is_email_verified=False,
         timezone=normalize_timezone(user_data.timezone),
     )
     session.add(user)
