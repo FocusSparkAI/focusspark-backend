@@ -120,7 +120,7 @@ class UserSettings(SQLModel, table=True):
     focus_sensitivity: str = Field(default="medium", max_length=50)
     fallback_method: str = Field(default="manual", max_length=50)
     notifications_enabled: bool = True
-    focus_alerts_enabled: bool = True
+    focus_alerts_enabled: bool = False
     integrations: Optional[dict] = Field(
         default=None,
         sa_column=Column(JSON, nullable=True),

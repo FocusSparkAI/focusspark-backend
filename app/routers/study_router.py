@@ -25,6 +25,13 @@ from app.models.productivity_model import (
 from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQuestion
 from app.services.achievement_service import award_earned_achievements, compute_achievement_progress
 from app.utils.auth import get_current_user
+from app.utils.timezone import (
+    utc_now,
+    user_day_start_utc,
+    user_local_date,
+    user_local_hour,
+    user_today,
+)
 
 
 router = APIRouter(prefix="/study", tags=["Study"])
@@ -172,12 +179,14 @@ def _get_owned_goal(goal_id: int, user_id: int, db: Session) -> StudyGoal:
     return study_goal
 
 
-def _goal_day(goal: StudyGoal) -> date:
+def _goal_day(goal: StudyGoal, user=None) -> date:
     if getattr(goal, "goal_date", None):
         return goal.goal_date
     if goal.due_date:
         return goal.due_date
-    return goal.created_at.date() if goal.created_at else datetime.utcnow().date()
+    if goal.created_at and user is not None:
+        return user_local_date(goal.created_at, user)
+    return goal.created_at.date() if goal.created_at else utc_now().date()
 
 
 def _goal_sort_key(goal: StudyGoal):
@@ -195,7 +204,7 @@ def _next_goal_position(user_id: int, goal_day: date, db: Session) -> int:
 
 
 def _sync_goal_completion(goal: StudyGoal, now: Optional[datetime] = None) -> None:
-    timestamp = now or datetime.utcnow()
+    timestamp = now or utc_now()
     goal.completed = goal.current_minutes >= goal.target_minutes
     goal.completed_at = timestamp if goal.completed else None
     goal.updated_at = timestamp
@@ -217,7 +226,7 @@ def _allocate_session_minutes_to_goals(
         key=lambda goal: (goal.position or 0, goal.id or 0),
     )
 
-    now = datetime.utcnow()
+    now = utc_now()
     for goal in todays_goals:
         if remaining <= 0:
             break
@@ -308,7 +317,7 @@ def _user_sessions_query(
 def _achievement_window_start(achievement: Achievement) -> Optional[datetime]:
     if achievement.criteria_window_days is None:
         return None
-    return datetime.utcnow() - timedelta(days=achievement.criteria_window_days)
+    return utc_now() - timedelta(days=achievement.criteria_window_days)
 
 
 def _compute_achievement_progress(
@@ -329,11 +338,10 @@ def _session_focus_score(session: StudySession) -> int:
     return 100 if (session.distraction_count or 0) == 0 else max(0, 100 - ((session.distraction_count or 0) * 10))
 
 
-def _current_streak_from_dates(study_dates: set[date]) -> int:
+def _current_streak_from_dates(study_dates: set[date], today: date) -> int:
     if not study_dates:
         return 0
 
-    today = datetime.utcnow().date()
     anchor = today if today in study_dates else today - timedelta(days=1)
     streak = 0
     cursor = anchor
@@ -370,38 +378,38 @@ def _recalculate_user_progress(user, db: Session) -> None:
     ).all()
 
     study_dates = {
-        session.started_at.date()
+            user_local_date(session.started_at, user)
         for session in sessions
         if session.started_at is not None and _session_minutes(session) > 0
     }
 
-    user.current_streak = _current_streak_from_dates(study_dates)
+    user.current_streak = _current_streak_from_dates(study_dates, user_today(user))
     user.longest_streak = _longest_streak_from_dates(study_dates)
     user.total_focus_minutes = sum(_session_minutes(session) for session in sessions)
-    user.updated_at = datetime.utcnow()
+    user.updated_at = utc_now()
     db.add(user)
 
 
-def _sessions_for_recent_days(user_id: int, db: Session, days: int) -> list[StudySession]:
-    start_date = datetime.combine(datetime.utcnow().date() - timedelta(days=days - 1), time.min)
+def _sessions_for_recent_days(user, db: Session, days: int) -> list[StudySession]:
+    start_date = user_day_start_utc(user_today(user) - timedelta(days=days - 1), user)
     return db.exec(
         select(StudySession)
-        .where(StudySession.user_id == user_id, StudySession.started_at >= start_date)
+        .where(StudySession.user_id == user.id, StudySession.started_at >= start_date)
         .order_by(StudySession.started_at.asc(), StudySession.id.asc())
     ).all()
 
 
-def _sessions_for_recent_weeks(user_id: int, db: Session, weeks: int) -> list[StudySession]:
-    start_date = datetime.combine(datetime.utcnow().date() - timedelta(days=(weeks * 7) - 1), time.min)
+def _sessions_for_recent_weeks(user, db: Session, weeks: int) -> list[StudySession]:
+    start_date = user_day_start_utc(user_today(user) - timedelta(days=(weeks * 7) - 1), user)
     return db.exec(
         select(StudySession)
-        .where(StudySession.user_id == user_id, StudySession.started_at >= start_date)
+        .where(StudySession.user_id == user.id, StudySession.started_at >= start_date)
         .order_by(StudySession.started_at.asc(), StudySession.id.asc())
     ).all()
 
 
-def _daily_focus_rows(sessions: list[StudySession], days: int = 7) -> list[dict]:
-    today = datetime.utcnow().date()
+def _daily_focus_rows(sessions: list[StudySession], user, days: int = 7) -> list[dict]:
+    today = user_today(user)
     buckets = {
         today - timedelta(days=offset): {
             "date": today - timedelta(days=offset),
@@ -416,7 +424,7 @@ def _daily_focus_rows(sessions: list[StudySession], days: int = 7) -> list[dict]
     for session in sessions:
         if not session.started_at:
             continue
-        session_day = session.started_at.date()
+        session_day = user_local_date(session.started_at, user)
         if session_day not in buckets:
             continue
         buckets[session_day]["minutes"] += _session_minutes(session) if session.completed else 0
@@ -441,8 +449,8 @@ def _daily_focus_rows(sessions: list[StudySession], days: int = 7) -> list[dict]
     return rows
 
 
-def _weekly_consistency_rows(sessions: list[StudySession], weeks: int = 4) -> list[dict]:
-    today = datetime.utcnow().date()
+def _weekly_consistency_rows(sessions: list[StudySession], user, weeks: int = 4) -> list[dict]:
+    today = user_today(user)
     rows = []
     for index in range(weeks, 0, -1):
         week_end = today - timedelta(days=(index - 1) * 7)
@@ -450,10 +458,10 @@ def _weekly_consistency_rows(sessions: list[StudySession], weeks: int = 4) -> li
         week_sessions = [
             session
             for session in sessions
-            if session.started_at and week_start <= session.started_at.date() <= week_end
+            if session.started_at and week_start <= user_local_date(session.started_at, user) <= week_end
         ]
         completed = [session for session in week_sessions if session.completed]
-        study_days = {session.started_at.date() for session in completed if session.started_at}
+        study_days = {user_local_date(session.started_at, user) for session in completed if session.started_at}
         rows.append(
             {
                 "week": f"Week {weeks - index + 1}",
@@ -467,12 +475,12 @@ def _weekly_consistency_rows(sessions: list[StudySession], weeks: int = 4) -> li
     return rows
 
 
-def _best_study_window(sessions: list[StudySession]) -> Optional[dict]:
+def _best_study_window(sessions: list[StudySession], user) -> Optional[dict]:
     hourly_scores: dict[int, list[int]] = defaultdict(list)
     for session in sessions:
         if not session.started_at or not session.completed or session.session_type != "work":
             continue
-        hourly_scores[session.started_at.hour].append(_session_focus_score(session))
+        hourly_scores[user_local_hour(session.started_at, user)].append(_session_focus_score(session))
 
     if not hourly_scores:
         return None
@@ -529,6 +537,29 @@ def _session_to_dict(session: StudySession) -> dict:
 
 def _settings_to_dict(settings: UserSettings) -> dict:
     return settings.model_dump(mode="json")
+
+
+def _records_to_dict(records: list) -> list[dict]:
+    return [record.model_dump(mode="json") for record in records]
+
+
+def _dedupe_notifications(notifications: list[Notification]) -> list[Notification]:
+    seen = set()
+    unique_notifications = []
+    for notification in notifications:
+        key = (notification.type, notification.title, notification.message)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique_notifications.append(notification)
+    return unique_notifications
+
+
+def _export_user_profile(user) -> dict:
+    profile = user.model_dump(mode="json")
+    profile.pop("password", None)
+    profile.pop("avatar_public_id", None)
+    return profile
 
 
 def _delete_records(db: Session, records: list) -> int:
@@ -621,7 +652,7 @@ def clear_account_data(
     user.current_streak = 0
     user.longest_streak = 0
     user.total_focus_minutes = 0
-    user.updated_at = datetime.utcnow()
+    user.updated_at = utc_now()
     db.add(user)
     db.commit()
 
@@ -637,7 +668,7 @@ def create_study_session(
     study_session = StudySession(
         user_id=user.id,
         session_type=payload.session_type,
-        started_at=payload.started_at or datetime.utcnow(),
+        started_at=payload.started_at or utc_now(),
         planned_duration_minutes=payload.planned_duration_minutes,
         notes=payload.notes,
     )
@@ -659,7 +690,7 @@ def complete_study_session(
 ):
     study_session = _get_owned_session(session_id, user.id, db)
     was_completed = study_session.completed
-    study_session.ended_at = payload.ended_at or datetime.utcnow()
+    study_session.ended_at = payload.ended_at or utc_now()
     study_session.actual_duration_minutes = payload.actual_duration_minutes
     if payload.distraction_count is not None:
         study_session.distraction_count = payload.distraction_count
@@ -669,7 +700,7 @@ def complete_study_session(
     if not was_completed and study_session.session_type == "work":
         _allocate_session_minutes_to_goals(
             user.id,
-            study_session.started_at.date() if study_session.started_at else datetime.utcnow().date(),
+            user_local_date(study_session.started_at, user) if study_session.started_at else user_today(user),
             _session_minutes(study_session),
             db,
         )
@@ -700,7 +731,7 @@ def log_distraction(
         confidence_score=payload.confidence_score,
         productive=payload.productive,
         payload=payload.payload,
-        detected_at=payload.detected_at or datetime.utcnow(),
+        detected_at=payload.detected_at or utc_now(),
     )
     study_session.distraction_count += 1
     db.add(event)
@@ -726,7 +757,7 @@ def log_emotion(
         session_id=session_pk,
         emotion=payload.emotion,
         confidence_score=payload.confidence_score,
-        detected_at=payload.detected_at or datetime.utcnow(),
+        detected_at=payload.detected_at or utc_now(),
     )
     db.add(event)
     db.commit()
@@ -810,17 +841,17 @@ def analytics_insights(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    sessions = _sessions_for_recent_weeks(user.id, db, 4)
+    sessions = _sessions_for_recent_weeks(user, db, 4)
     completed = [session for session in sessions if session.completed]
     work_sessions = [session for session in completed if session.session_type == "work"]
-    daily_focus = _daily_focus_rows(_sessions_for_recent_days(user.id, db, 7), 7)
-    weekly_consistency = _weekly_consistency_rows(sessions, 4)
-    today = datetime.utcnow().date()
+    daily_focus = _daily_focus_rows(_sessions_for_recent_days(user, db, 7), user, 7)
+    weekly_consistency = _weekly_consistency_rows(sessions, user, 4)
+    today = user_today(user)
     recent_goals = _goals_between(user.id, today - timedelta(days=27), today, db)
     recent_goal_stats = _goal_stats(recent_goals)
 
     best_day = max(daily_focus, key=lambda item: (item["minutes"], item["focus_score"]), default=None)
-    best_window = _best_study_window(work_sessions)
+    best_window = _best_study_window(work_sessions, user)
     total_minutes = sum(_session_minutes(session) for session in work_sessions)
     total_distractions = sum(session.distraction_count or 0 for session in completed)
     average_focus = (
@@ -888,7 +919,7 @@ def dashboard_stats(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    sessions = _sessions_for_recent_days(user.id, db, 7)
+    sessions = _sessions_for_recent_days(user, db, 7)
     completed = [session for session in sessions if session.completed]
     work_sessions = [session for session in completed if session.session_type == "work"]
     weekly_focus_minutes = sum(_session_minutes(session) for session in work_sessions)
@@ -902,7 +933,7 @@ def dashboard_stats(
     achievements = _ordered_achievements(db)
     unlocked = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
     unlocked_achievement_ids = {item.achievement_id for item in unlocked}
-    today = datetime.utcnow().date()
+    today = user_today(user)
     today_goals = _goals_for_day(user.id, today, db)
     active_goal = next((goal for goal in today_goals if not goal.completed), None)
     today_goal_stats = _goal_stats(today_goals)
@@ -925,7 +956,7 @@ def dashboard_stats(
         "badges_earned": len(unlocked_achievement_ids),
         "total_badges": len(achievements),
         "completed_sessions_this_week": len(completed),
-        "daily_focus": _daily_focus_rows(sessions, 7),
+        "daily_focus": _daily_focus_rows(sessions, user, 7),
         "recent_activity": recent_activity,
         "today_goals": [goal.model_dump(mode="json") for goal in today_goals],
         "active_goal": active_goal.model_dump(mode="json") if active_goal else None,
@@ -939,8 +970,9 @@ def create_study_goal(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    goal_day = payload.goal_date or payload.due_date or datetime.utcnow().date()
+    goal_day = payload.goal_date or payload.due_date or user_today(user)
     current_minutes = min(payload.current_minutes, payload.target_minutes)
+    now = utc_now()
     study_goal = StudyGoal(
         user_id=user.id,
         title=payload.title.strip() or "Study",
@@ -950,8 +982,8 @@ def create_study_goal(
         goal_date=goal_day,
         position=payload.position or _next_goal_position(user.id, goal_day, db),
         due_date=payload.due_date or goal_day,
-        completed_at=datetime.utcnow() if current_minutes >= payload.target_minutes else None,
-        updated_at=datetime.utcnow(),
+        completed_at=now if current_minutes >= payload.target_minutes else None,
+        updated_at=now,
     )
     db.add(study_goal)
     db.commit()
@@ -998,7 +1030,7 @@ def update_study_goal(
         study_goal.current_minutes = min(payload.current_minutes, study_goal.target_minutes)
     if payload.completed is not None:
         study_goal.completed = payload.completed
-        study_goal.completed_at = datetime.utcnow() if payload.completed else None
+        study_goal.completed_at = utc_now() if payload.completed else None
     else:
         _sync_goal_completion(study_goal)
     if payload.goal_date is not None:
@@ -1007,7 +1039,7 @@ def update_study_goal(
         study_goal.position = payload.position
     if payload.due_date is not None:
         study_goal.due_date = payload.due_date
-    study_goal.updated_at = datetime.utcnow()
+    study_goal.updated_at = utc_now()
     db.add(study_goal)
     db.commit()
     db.refresh(study_goal)
@@ -1127,7 +1159,7 @@ def list_notifications(
     if limit is not None:
         statement = statement.limit(limit)
 
-    notifications = db.exec(statement).all()
+    notifications = _dedupe_notifications(db.exec(statement).all())
     return [notification.model_dump(mode="json") for notification in notifications]
 
 
@@ -1214,7 +1246,7 @@ def update_user_settings(
         settings.accessibility = payload.accessibility
     if payload.privacy is not None:
         settings.privacy = payload.privacy
-    settings.updated_at = datetime.utcnow()
+    settings.updated_at = utc_now()
     db.add(settings)
     db.commit()
     db.refresh(settings)
@@ -1242,14 +1274,96 @@ def export_study_data(
     settings = _get_user_settings(user.id, db)
 
     if normalized_format == "json":
+        quiz_attempts = db.exec(
+            select(QuizAttempt).where(QuizAttempt.user_id == user.id)
+        ).all()
+        attempt_ids = [attempt.id for attempt in quiz_attempts if attempt.id is not None]
+        quiz_attempt_answers = (
+            db.exec(
+                select(QuizAttemptAnswer).where(QuizAttemptAnswer.attempt_id.in_(attempt_ids))
+            ).all()
+            if attempt_ids
+            else []
+        )
+
+        quizzes = db.exec(select(Quiz).where(Quiz.user_id == user.id)).all()
+        quiz_ids = [quiz.id for quiz in quizzes if quiz.id is not None]
+        quiz_questions = (
+            db.exec(select(QuizQuestion).where(QuizQuestion.quiz_id.in_(quiz_ids))).all()
+            if quiz_ids
+            else []
+        )
+
+        flashcard_decks = db.exec(
+            select(FlashcardDeck).where(FlashcardDeck.user_id == user.id)
+        ).all()
+        deck_ids = [deck.id for deck in flashcard_decks if deck.id is not None]
+        flashcards = (
+            db.exec(select(Flashcard).where(Flashcard.deck_id.in_(deck_ids))).all()
+            if deck_ids
+            else []
+        )
+        flashcard_reviews = db.exec(
+            select(FlashcardReview).where(FlashcardReview.user_id == user.id)
+        ).all()
+
+        chat_threads = db.exec(
+            select(ChatThread).where(ChatThread.user_id == user.id)
+        ).all()
+        thread_ids = [thread.id for thread in chat_threads if thread.id is not None]
+        chat_messages = (
+            db.exec(select(ChatMessage).where(ChatMessage.thread_id.in_(thread_ids))).all()
+            if thread_ids
+            else []
+        )
+        message_ids = [message.id for message in chat_messages if message.id is not None]
+        message_artifacts = (
+            db.exec(
+                select(MessageArtifact).where(MessageArtifact.message_id.in_(message_ids))
+            ).all()
+            if message_ids
+            else []
+        )
+
+        documents = db.exec(select(Document).where(Document.user_id == user.id)).all()
+        distraction_events = db.exec(
+            select(DistractionEvent).where(DistractionEvent.user_id == user.id)
+        ).all()
+        emotion_logs = db.exec(
+            select(EmotionLog).where(EmotionLog.user_id == user.id)
+        ).all()
+        study_goals = db.exec(select(StudyGoal).where(StudyGoal.user_id == user.id)).all()
+        notifications = db.exec(
+            select(Notification).where(Notification.user_id == user.id)
+        ).all()
+
+        serialized_sessions = [_session_to_dict(session) for session in sessions]
         return {
-            "exported_at": datetime.utcnow().isoformat(),
+            "exported_at": utc_now().isoformat(),
             "user_id": user.id,
-            "sessions": [_session_to_dict(session) for session in sessions],
+            "profile": _export_user_profile(user),
+            "sessions": serialized_sessions,
+            "study_sessions": serialized_sessions,
+            "study_goals": _records_to_dict(study_goals),
+            "quizzes": _records_to_dict(quizzes),
+            "quiz_questions": _records_to_dict(quiz_questions),
+            "quiz_attempts": _records_to_dict(quiz_attempts),
+            "quiz_attempt_answers": _records_to_dict(quiz_attempt_answers),
+            "flashcard_decks": _records_to_dict(flashcard_decks),
+            "flashcards": _records_to_dict(flashcards),
+            "flashcard_reviews": _records_to_dict(flashcard_reviews),
+            "chat_threads": _records_to_dict(chat_threads),
+            "chat_messages": _records_to_dict(chat_messages),
+            "message_artifacts": _records_to_dict(message_artifacts),
+            "documents": _records_to_dict(documents),
+            "distraction_events": _records_to_dict(distraction_events),
+            "emotion_logs": _records_to_dict(emotion_logs),
             "achievements": [
                 _serialize_achievement(achievement, user, db, unlocked_by_id.get(achievement.id))
                 for achievement in achievements
             ],
+            "user_achievements": _records_to_dict(unlocked),
+            "notifications": _records_to_dict(notifications),
             "settings": _settings_to_dict(settings),
         }
 

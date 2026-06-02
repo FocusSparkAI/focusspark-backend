@@ -13,6 +13,7 @@ from app.services.quiz_service import (
     create_quiz_from_chat
 )
 from app.utils.auth import get_current_user
+from app.utils.timezone import utc_now
 
 
 router = APIRouter(prefix="/quiz", tags=["Quiz"])
@@ -196,8 +197,8 @@ def submit_quiz_attempt(
         total_questions=total_questions,
         percentage=0.0,
         passed=False,
-        started_at=payload.started_at or datetime.utcnow(),
-        completed_at=payload.completed_at or datetime.utcnow(),
+        started_at=payload.started_at or utc_now(),
+        completed_at=payload.completed_at or utc_now(),
         time_taken_seconds=payload.time_taken_seconds,
     )
     session.add(attempt)

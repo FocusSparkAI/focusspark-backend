@@ -39,7 +39,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Build Docker Image
-        run: docker image build -t focusspark-backend:ci .
+        run: docker build -t focusspark-backend:ci .
 
       - name: List the Images
         run: docker image ls

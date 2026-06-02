@@ -11,6 +11,7 @@ class UserSignup(BaseModel):
     confirm_password: str
     academic_focus: AcademicFocus
     accepted_terms: bool
+    timezone: Optional[str] = None
     
 
 class UserLogin(BaseModel):
@@ -31,6 +32,7 @@ class UserProfile(BaseModel):
     academic_focus: AcademicFocus
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
+    timezone: str = "UTC"
     last_login: Optional[datetime] = None
     created_at: datetime
 
@@ -40,3 +42,4 @@ class UserProfileUpdate(BaseModel):
     academic_focus: Optional[AcademicFocus] = None
     bio: Optional[str] = None
     avatar_url: Optional[str] = None
+    timezone: Optional[str] = None

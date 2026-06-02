@@ -46,6 +46,10 @@ def _ensure_user_profile_columns():
         additions.append(("bio", "TEXT NULL"))
     if "avatar_url" not in existing:
         additions.append(("avatar_url", "VARCHAR(1024) NULL"))
+    if "avatar_public_id" not in existing:
+        additions.append(("avatar_public_id", "VARCHAR(255) NULL"))
+    if "timezone" not in existing:
+        additions.append(("timezone", "VARCHAR(100) NOT NULL DEFAULT 'UTC'"))
     if "updated_at" not in existing:
         additions.append(("updated_at", f"{timestamp_type} NULL"))
     if "last_login" not in existing:

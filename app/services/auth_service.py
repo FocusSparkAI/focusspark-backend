@@ -1,4 +1,3 @@
-from datetime import datetime
 from hashlib import sha256
 
 from sqlmodel import Session, select
@@ -19,6 +18,7 @@ from app.models.user_model import User
 from app.schemas.user_schema import UserSignup, UserLogin
 from app.utils.hashing import hash_password, verify_password
 from app.utils.jwt_handler import get_token_expiration
+from app.utils.timezone import normalize_timezone, utc_now
 
 
 def _token_hash(token: str) -> str:
@@ -29,6 +29,13 @@ def create_user(user_data: UserSignup, session: Session):
     # check password match
     if user_data.password != user_data.confirm_password:
         raise ValueError("Passwords do not match")
+
+    if (
+        len(user_data.password) < 8
+        or not any(char.isalpha() for char in user_data.password)
+        or not any(char.isdigit() for char in user_data.password)
+    ):
+        raise ValueError("Password must be at least 8 characters, including a letter and a number")
     
     # check terms acceptance
     if not user_data.accepted_terms:
@@ -46,6 +53,7 @@ def create_user(user_data: UserSignup, session: Session):
         password=hash_password(user_data.password),
         academic_focus=user_data.academic_focus,
         accepted_terms=user_data.accepted_terms,
+        timezone=normalize_timezone(user_data.timezone),
     )
     session.add(user)
     session.commit()
@@ -92,7 +100,7 @@ def is_access_token_expired(token: str, session: Session) -> bool:
     if not expired_token:
         return False
 
-    if expired_token.expires_at and expired_token.expires_at < datetime.utcnow():
+    if expired_token.expires_at and expired_token.expires_at < utc_now():
         session.delete(expired_token)
         session.commit()
         return False
