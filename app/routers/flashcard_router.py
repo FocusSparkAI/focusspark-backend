@@ -88,9 +88,38 @@ def get_flashcards(
     if not deck:
         raise HTTPException(status_code=404, detail="Deck not found")
 
-    return session.exec(
+    flashcards = session.exec(
         select(Flashcard).where(Flashcard.deck_id == deck_id)
     ).all()
+    card_ids = [flashcard.id for flashcard in flashcards if flashcard.id is not None]
+    reviews = (
+        session.exec(
+            select(FlashcardReview).where(
+                FlashcardReview.user_id == user.id,
+                FlashcardReview.flashcard_id.in_(card_ids),
+            )
+        ).all()
+        if card_ids
+        else []
+    )
+    reviews_by_card_id = {review.flashcard_id: review for review in reviews}
+
+    response = []
+    for flashcard in flashcards:
+        card_data = flashcard.model_dump(mode="json")
+        review = reviews_by_card_id.get(flashcard.id)
+        if review:
+            card_data.update(
+                {
+                    "correct_count": review.correct_count,
+                    "incorrect_count": review.incorrect_count,
+                    "last_reviewed": review.last_reviewed_at,
+                    "known": review.known,
+                }
+            )
+        response.append(card_data)
+
+    return response
 
 
 @router.post("/generate", response_model=FlashcardBundleResponse)
