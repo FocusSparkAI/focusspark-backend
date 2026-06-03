@@ -24,8 +24,8 @@ RUN python -m pip install --upgrade pip \
 # Copy this project backend app into the image
 COPY app ./app
 
-# Create runtime folders for uploads and logs
-RUN mkdir -p uploads logs
+# Create runtime folder for logs
+RUN mkdir -p logs
 
 EXPOSE 8000
 
