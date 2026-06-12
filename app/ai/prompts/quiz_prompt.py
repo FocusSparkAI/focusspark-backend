@@ -20,8 +20,8 @@ Generate {question_count} MCQs in JSON:
 [
   {{
     "question": "...",
-    "options": ["A","B","C","D"],
-    "correct_answer_index": 0,
+    "options": ["Incorrect option","Correct option","Incorrect option","Incorrect option"],
+    "correct_answer_index": 1,
     "explanation": "Briefly explain why the correct answer is right."
   }}
 ]
@@ -31,6 +31,7 @@ Rules:
 - Return ONLY valid JSON (no markdown, no explanation text).
 - "correct_answer_index" must be an integer and zero-based.
 - The index must point to one item in "options".
+- Vary the correct answer position across questions; do not always use the first option.
 - Include an "explanation" for every question.
 - Keep each explanation short: 1 sentence, about 10-25 words.
 - Match the requested difficulty level exactly: {difficulty.value}.

@@ -1,4 +1,5 @@
 import logging
+import random
 
 from sqlmodel import Session, select
 from app.ai.features.quiz import quiz_feature
@@ -9,6 +10,13 @@ from app.services.achievement_service import award_earned_achievements_for_user
 
 DEFAULT_CHAT_QUIZ_DIFFICULTY = QuizDifficulty.BEGINNER
 logger = logging.getLogger(__name__)
+
+
+def _shuffle_options(options: list[str], correct_answer_index: int) -> tuple[list[str], int]:
+    correct_answer = options[correct_answer_index]
+    shuffled_options = options[:]
+    random.shuffle(shuffled_options)
+    return shuffled_options, shuffled_options.index(correct_answer)
 
 
 def _award_quiz_achievements(user_id: int, session: Session) -> None:
@@ -81,6 +89,8 @@ def _validate_quiz_questions(questions):
             raise ValueError("Quiz item must include int 'correct_answer_index'")
         if answer_index < 0 or answer_index >= len(options):
             raise ValueError("'correct_answer_index' is out of range for options")
+
+        options, answer_index = _shuffle_options(options, answer_index)
 
         normalized.append(
             {
