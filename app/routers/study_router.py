@@ -106,6 +106,28 @@ class UserSettingsUpdate(BaseModel):
     privacy: Optional[dict] = None
 
 
+def _normalize_theme(value: object) -> Optional[str]:
+    return value if value in ("light", "dark") else None
+
+
+def _settings_theme(settings: UserSettings) -> str:
+    appearance_theme = None
+    if isinstance(settings.appearance, dict):
+        appearance_theme = _normalize_theme(settings.appearance.get("theme"))
+    return appearance_theme or ("dark" if settings.dark_mode else "light")
+
+
+def _apply_settings_theme(settings: UserSettings, theme: str):
+    next_theme = _normalize_theme(theme)
+    if next_theme is None:
+        raise HTTPException(status_code=422, detail="Theme must be 'light' or 'dark'")
+
+    appearance = settings.appearance.copy() if isinstance(settings.appearance, dict) else {}
+    appearance["theme"] = next_theme
+    settings.appearance = appearance
+    settings.dark_mode = next_theme == "dark"
+
+
 class AchievementResponse(BaseModel):
     id: int
     key: Optional[str] = None
@@ -277,6 +299,11 @@ def _get_user_settings(user_id: int, db: Session) -> UserSettings:
         select(UserSettings).where(UserSettings.user_id == user_id)
     ).first()
     if settings:
+        if not isinstance(settings.appearance, dict) or _normalize_theme(settings.appearance.get("theme")) is None:
+            _apply_settings_theme(settings, "dark" if settings.dark_mode else "light")
+            db.add(settings)
+            db.commit()
+            db.refresh(settings)
         return settings
 
     settings = UserSettings(user_id=user_id)
@@ -536,7 +563,11 @@ def _session_to_dict(session: StudySession) -> dict:
 
 
 def _settings_to_dict(settings: UserSettings) -> dict:
-    return settings.model_dump(mode="json")
+    data = settings.model_dump(mode="json")
+    data["appearance"] = data.get("appearance") or {}
+    data["appearance"]["theme"] = _settings_theme(settings)
+    data["dark_mode"] = data["appearance"]["theme"] == "dark"
+    return data
 
 
 def _records_to_dict(records: list) -> list[dict]:
@@ -1207,7 +1238,7 @@ def get_user_settings(
     user=Depends(get_current_user),
 ):
     settings = _get_user_settings(user.id, db)
-    return settings.model_dump(mode="json")
+    return _settings_to_dict(settings)
 
 
 @router.put("/settings")
@@ -1218,7 +1249,7 @@ def update_user_settings(
 ):
     settings = _get_user_settings(user.id, db)
     if payload.dark_mode is not None:
-        settings.dark_mode = payload.dark_mode
+        _apply_settings_theme(settings, "dark" if payload.dark_mode else "light")
     if payload.pomodoro_duration_minutes is not None:
         settings.pomodoro_duration_minutes = payload.pomodoro_duration_minutes
     if payload.break_duration_minutes is not None:
@@ -1241,7 +1272,14 @@ def update_user_settings(
     if payload.integrations is not None:
         settings.integrations = payload.integrations
     if payload.appearance is not None:
+        theme = _normalize_theme(payload.appearance.get("theme"))
+        if "theme" in payload.appearance and theme is None:
+            raise HTTPException(status_code=422, detail="Theme must be 'light' or 'dark'")
         settings.appearance = payload.appearance
+        if theme is not None:
+            _apply_settings_theme(settings, theme)
+        else:
+            _apply_settings_theme(settings, "dark" if settings.dark_mode else "light")
     if payload.accessibility is not None:
         settings.accessibility = payload.accessibility
     if payload.privacy is not None:
@@ -1250,7 +1288,7 @@ def update_user_settings(
     db.add(settings)
     db.commit()
     db.refresh(settings)
-    return settings.model_dump(mode="json")
+    return _settings_to_dict(settings)
 
 
 @router.get("/export")

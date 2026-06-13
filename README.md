@@ -4,6 +4,8 @@ FastAPI backend for FocusSpark, an AI-assisted study platform for focus tracking
 
 This service powers both the web frontend and the Chrome extension.
 
+For the complete multi-project setup, start with the root `README.md`.
+
 ## Tech Stack
 
 - FastAPI and Uvicorn
@@ -19,7 +21,7 @@ This service powers both the web frontend and the Chrome extension.
 
 ## Features
 
-- Signup, login, JWT protected routes, password changes, and logout-token expiry
+- Signup, login, JWT protected routes, password changes, and account deletion
 - Profile management with name, academic focus, bio, timezone, last login, and profile picture upload/delete
 - Cloudinary-backed avatar storage with image validation, crop/resize processing, overwrite support, and old-avatar cleanup
 - AI chat threads, document chat, and generated artifacts
@@ -52,13 +54,24 @@ CLOUDINARY_CLOUD_NAME=your-cloud-name
 CLOUDINARY_API_KEY=your-api-key
 CLOUDINARY_API_SECRET=your-api-secret
 
-CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
 LOG_LEVEL=INFO
 LOG_TO_FILE=true
 LOG_FILE=logs/app.log
 LOG_MAX_BYTES=5242880
 LOG_BACKUP_COUNT=5
 SQL_ECHO=false
+
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your-email@example.com
+SMTP_PASSWORD=your-email-password
+SMTP_FROM_EMAIL=no-reply@focusspark.local
+SMTP_FROM_NAME=FocusSpark
+SMTP_USE_TLS=true
+EMAIL_LOGO_URL=https://example.com/logo.png
+EMAIL_VERIFICATION_OTP_MINUTES=10
+PASSWORD_RESET_OTP_MINUTES=10
 ```
 
 To use Gemini instead of the OpenAI-compatible provider:
@@ -69,14 +82,19 @@ GOOGLE_API_KEY=your-google-api-key
 GEMINI_MODEL=gemini-2.5-flash
 ```
 
-## Install And Run
+## Install and Run
+
+From this folder:
 
 ```bash
+cd FocusSpark-Backend
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+Before running locally without Docker, make sure PostgreSQL is running and the database in `DATABASE_URL` exists. With the sample value above, create a local database named `focusspark`.
 
 Local URLs:
 
@@ -115,15 +133,19 @@ Create `.env.docker`:
 
 ```env
 DATABASE_URL=postgresql+psycopg2://postgres:pwd@db:5432/focusspark
-JWT_SECRET=your-local-secret-key
+JWT_SECRET=your-32-character-secret-key-here
+AI_PROVIDER=openai
+GITHUB_TOKEN=github_pat_xxxxx
 CLOUDINARY_CLOUD_NAME=your-cloud-name
 CLOUDINARY_API_KEY=your-api-key
 CLOUDINARY_API_SECRET=your-api-secret
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
 ```
 
 Run:
 
 ```bash
+cd FocusSpark-Backend
 docker compose up --build
 ```
 
@@ -172,13 +194,20 @@ Authorization: Bearer <token>
 Main auth/profile routes:
 
 - `POST /auth/signup`
+- `POST /auth/verify-email`
+- `POST /auth/resend-verification-otp`
 - `POST /auth/login`
+- `POST /auth/forgot-password`
+- `POST /auth/verify-password-reset-otp`
+- `POST /auth/reset-password`
 - `PATCH /auth/password`
 - `GET /auth/profile`
 - `PATCH /auth/profile`
 - `POST /auth/profile/avatar`
 - `DELETE /auth/profile/avatar`
 - `DELETE /auth/delete-user`
+
+Email verification and password-reset routes use short-lived OTP codes. If `SMTP_HOST` is not configured, the email service logs the message instead of sending it.
 
 Signup example:
 
@@ -319,7 +348,7 @@ Flashcards:
 - `GET /flashcards/{deck_id}`
 - `POST /flashcards/generate`
 - `POST /flashcards/from-chat`
-- `PUT /flashcards/{flashcard_id}/review`
+- `PUT /flashcards/{deck_id}/review-complete`
 
 Quizzes:
 
