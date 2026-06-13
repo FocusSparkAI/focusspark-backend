@@ -7,6 +7,7 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field as PydanticField
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from app.db.database import get_session
@@ -23,7 +24,12 @@ from app.models.productivity_model import (
     UserSettings,
 )
 from app.models.quiz_model import Quiz, QuizAttempt, QuizAttemptAnswer, QuizQuestion
-from app.services.achievement_service import award_earned_achievements, compute_achievement_progress
+from app.services.achievement_service import (
+    AchievementProgressContext,
+    award_earned_achievements,
+    build_achievement_progress_context,
+    compute_achievement_progress,
+)
 from app.utils.auth import get_current_user
 from app.utils.timezone import (
     utc_now,
@@ -351,8 +357,9 @@ def _compute_achievement_progress(
     achievement: Achievement,
     user,
     db: Session,
+    context: Optional[AchievementProgressContext] = None,
 ) -> tuple[int, int]:
-    return compute_achievement_progress(achievement, user, db)
+    return compute_achievement_progress(achievement, user, db, context)
 
 
 def _session_minutes(session: StudySession) -> int:
@@ -530,8 +537,9 @@ def _serialize_achievement(
     user,
     db: Session,
     user_achievement: Optional[UserAchievement] = None,
+    progress_context: Optional[AchievementProgressContext] = None,
 ) -> dict:
-    current, target = _compute_achievement_progress(achievement, user, db)
+    current, target = _compute_achievement_progress(achievement, user, db, progress_context)
     unlocked = user_achievement is not None
 
     criteria_data = achievement.criteria_data or {}
@@ -584,6 +592,122 @@ def _dedupe_notifications(notifications: list[Notification]) -> list[Notificatio
         seen.add(key)
         unique_notifications.append(notification)
     return unique_notifications
+
+
+def _profile_summary(user) -> dict:
+    return {
+        "id": user.id,
+        "full_name": user.full_name,
+        "name": user.full_name,
+        "avatar_url": user.avatar_url,
+        "timezone": user.timezone,
+    }
+
+
+def _dashboard_stats_payload(user, db: Session) -> dict:
+    sessions = _sessions_for_recent_days(user, db, 7)
+    completed = [session for session in sessions if session.completed]
+    work_sessions = [session for session in completed if session.session_type == "work"]
+    weekly_focus_minutes = sum(_session_minutes(session) for session in work_sessions)
+    average_focus = (
+        round(sum(_session_focus_score(session) for session in work_sessions) / len(work_sessions))
+        if work_sessions
+        else 0
+    )
+
+    achievements = _ordered_achievements(db)
+    unlocked = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
+    unlocked_achievement_ids = {item.achievement_id for item in unlocked}
+    today = user_today(user)
+    today_goals = _goals_for_day(user.id, today, db)
+    active_goal = next((goal for goal in today_goals if not goal.completed), None)
+    today_goal_stats = _goal_stats(today_goals)
+
+    recent_activity = [
+        {
+            "label": f"Completed {session.session_type} session",
+            "time": session.ended_at or session.started_at,
+            "type": "session_completed",
+        }
+        for session in sorted(completed, key=lambda item: item.ended_at or item.started_at, reverse=True)[:5]
+    ]
+
+    return {
+        "weekly_focus_minutes": weekly_focus_minutes,
+        "weekly_focus_hours": round(weekly_focus_minutes / 60, 1),
+        "focus_score": average_focus,
+        "current_streak": int(getattr(user, "current_streak", 0) or 0),
+        "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
+        "badges_earned": len(unlocked_achievement_ids),
+        "total_badges": len(achievements),
+        "completed_sessions_this_week": len(completed),
+        "daily_focus": _daily_focus_rows(sessions, user, 7),
+        "recent_activity": recent_activity,
+        "today_goals": [goal.model_dump(mode="json") for goal in today_goals],
+        "active_goal": active_goal.model_dump(mode="json") if active_goal else None,
+        "today_goal_stats": today_goal_stats,
+    }
+
+
+def _unlocked_achievement_summaries(user_id: int, db: Session) -> list[dict]:
+    achievements = _ordered_achievements(db)
+    achievements_by_id = {achievement.id: achievement for achievement in achievements}
+    achievement_notifications_by_message = {
+        notification.message: notification
+        for notification in db.exec(
+            select(Notification).where(
+                Notification.user_id == user_id,
+                Notification.type == "achievement",
+            )
+        ).all()
+    }
+    unlocked = db.exec(
+        select(UserAchievement)
+        .where(UserAchievement.user_id == user_id)
+        .order_by(UserAchievement.unlocked_at.desc(), UserAchievement.id.desc())
+    ).all()
+    return [
+        {
+            "id": achievement.id,
+            "key": achievement.key,
+            "title": achievement.title,
+            "description": achievement.description,
+            "badge_icon": achievement.badge_icon,
+            "unlocked": True,
+            "unlocked_at": user_achievement.unlocked_at,
+            "achievement_title": user_achievement.achievement_title,
+            "notification_id": notification.id if notification else None,
+            "notification_read": notification.read if notification else False,
+        }
+        for user_achievement in unlocked
+        if (achievement := achievements_by_id.get(user_achievement.achievement_id)) is not None
+        for notification in [achievement_notifications_by_message.get(f"You unlocked {achievement.title}.")]
+    ]
+
+
+def _notification_summary(user_id: int, db: Session, limit: int = 10) -> dict:
+    notifications = _dedupe_notifications(
+        db.exec(
+            select(Notification)
+            .where(Notification.user_id == user_id)
+            .order_by(Notification.read.asc(), Notification.created_at.desc(), Notification.id.desc())
+            .limit(limit)
+        ).all()
+    )
+    unread_count = db.exec(
+        select(func.count(Notification.id)).where(
+            Notification.user_id == user_id,
+            Notification.read == False,  # noqa: E712
+        )
+    ).one()
+    return {
+        "items": [notification.model_dump(mode="json") for notification in notifications],
+        "unread_count": unread_count,
+    }
+
+
+def _count_user_records(model, user_id: int, db: Session) -> int:
+    return db.exec(select(func.count(model.id)).where(model.user_id == user_id)).one()
 
 
 def _export_user_profile(user) -> dict:
@@ -950,48 +1074,45 @@ def dashboard_stats(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    sessions = _sessions_for_recent_days(user, db, 7)
-    completed = [session for session in sessions if session.completed]
-    work_sessions = [session for session in completed if session.session_type == "work"]
-    weekly_focus_minutes = sum(_session_minutes(session) for session in work_sessions)
-    average_focus = (
-        round(sum(_session_focus_score(session) for session in work_sessions) / len(work_sessions))
-        if work_sessions
-        else 0
-    )
+    return _dashboard_stats_payload(user, db)
 
-    _ensure_earned_achievements(user, db)
-    achievements = _ordered_achievements(db)
-    unlocked = db.exec(select(UserAchievement).where(UserAchievement.user_id == user.id)).all()
-    unlocked_achievement_ids = {item.achievement_id for item in unlocked}
-    today = user_today(user)
-    today_goals = _goals_for_day(user.id, today, db)
-    active_goal = next((goal for goal in today_goals if not goal.completed), None)
-    today_goal_stats = _goal_stats(today_goals)
 
-    recent_activity = [
-        {
-            "label": f"Completed {session.session_type} session",
-            "time": session.ended_at or session.started_at,
-            "type": "session_completed",
-        }
-        for session in sorted(completed, key=lambda item: item.ended_at or item.started_at, reverse=True)[:5]
-    ]
-
+@router.get("/dashboard/frontend")
+def frontend_dashboard(
+    db: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    settings = _get_user_settings(user.id, db)
     return {
-        "weekly_focus_minutes": weekly_focus_minutes,
-        "weekly_focus_hours": round(weekly_focus_minutes / 60, 1),
-        "focus_score": average_focus,
-        "current_streak": int(getattr(user, "current_streak", 0) or 0),
-        "longest_streak": int(getattr(user, "longest_streak", 0) or 0),
-        "badges_earned": len(unlocked_achievement_ids),
-        "total_badges": len(achievements),
-        "completed_sessions_this_week": len(completed),
-        "daily_focus": _daily_focus_rows(sessions, user, 7),
-        "recent_activity": recent_activity,
-        "today_goals": [goal.model_dump(mode="json") for goal in today_goals],
-        "active_goal": active_goal.model_dump(mode="json") if active_goal else None,
-        "today_goal_stats": today_goal_stats,
+        "profile": _profile_summary(user),
+        "settings": _settings_to_dict(settings),
+        "dashboard": _dashboard_stats_payload(user, db),
+        "unlocked_achievements": _unlocked_achievement_summaries(user.id, db),
+        "notifications": _notification_summary(user.id, db),
+    }
+
+
+@router.get("/dashboard/extension")
+def extension_dashboard(
+    db: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    settings = _get_user_settings(user.id, db)
+    dashboard = _dashboard_stats_payload(user, db)
+    return {
+        "profile": _profile_summary(user),
+        "settings": _settings_to_dict(settings),
+        "dashboard": {
+            "current_streak": dashboard["current_streak"],
+            "active_goal": dashboard["active_goal"],
+            "today_goals": dashboard["today_goals"],
+            "today_goal_stats": dashboard["today_goal_stats"],
+        },
+        "counts": {
+            "flashcard_decks": _count_user_records(FlashcardDeck, user.id, db),
+            "quiz_sets": _count_user_records(Quiz, user.id, db),
+        },
+        "notifications": _notification_summary(user.id, db),
     }
 
 
@@ -1100,8 +1221,15 @@ def list_achievements(
         select(UserAchievement).where(UserAchievement.user_id == user.id)
     ).all()
     unlocked_by_id = {item.achievement_id: item for item in unlocked}
+    progress_context = build_achievement_progress_context(user, db)
     return [
-        _serialize_achievement(achievement, user, db, unlocked_by_id.get(achievement.id))
+        _serialize_achievement(
+            achievement,
+            user,
+            db,
+            unlocked_by_id.get(achievement.id),
+            progress_context,
+        )
         for achievement in achievements
     ]
 
@@ -1114,6 +1242,7 @@ def list_unlocked_achievements(
     _ensure_earned_achievements(user, db)
     achievements = _ordered_achievements(db)
     achievements_by_id = {achievement.id: achievement for achievement in achievements}
+    progress_context = build_achievement_progress_context(user, db)
     unlocked = db.exec(
         select(UserAchievement)
         .where(UserAchievement.user_id == user.id)
@@ -1125,6 +1254,7 @@ def list_unlocked_achievements(
             user,
             db,
             user_achievement,
+            progress_context,
         )
         for user_achievement in unlocked
         if user_achievement.achievement_id in achievements_by_id
@@ -1181,7 +1311,6 @@ def list_notifications(
     db: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    _ensure_earned_achievements(user, db)
     statement = (
         select(Notification)
         .where(Notification.user_id == user.id)
@@ -1375,6 +1504,8 @@ def export_study_data(
             select(Notification).where(Notification.user_id == user.id)
         ).all()
 
+        progress_context = build_achievement_progress_context(user, db)
+
         serialized_sessions = [_session_to_dict(session) for session in sessions]
         return {
             "exported_at": utc_now().isoformat(),
@@ -1397,7 +1528,13 @@ def export_study_data(
             "distraction_events": _records_to_dict(distraction_events),
             "emotion_logs": _records_to_dict(emotion_logs),
             "achievements": [
-                _serialize_achievement(achievement, user, db, unlocked_by_id.get(achievement.id))
+                _serialize_achievement(
+                    achievement,
+                    user,
+                    db,
+                    unlocked_by_id.get(achievement.id),
+                    progress_context,
+                )
                 for achievement in achievements
             ],
             "user_achievements": _records_to_dict(unlocked),

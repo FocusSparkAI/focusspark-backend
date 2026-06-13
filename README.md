@@ -6,6 +6,20 @@ This service powers both the web frontend and the Chrome extension.
 
 For the complete multi-project setup, start with the root `README.md`.
 
+## Quick Start
+
+```bash
+cd FocusSpark-Backend
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Before starting, create `.env` and make sure PostgreSQL is running with the database named in `DATABASE_URL`.
+
+Expected result: Uvicorn reports that it is running on `http://127.0.0.1:8000`, and `GET /` returns `{"message": "FocusSpark Backend Running"}`.
+
 ## Tech Stack
 
 - FastAPI and Uvicorn
@@ -21,7 +35,7 @@ For the complete multi-project setup, start with the root `README.md`.
 
 ## Features
 
-- Signup, login, JWT protected routes, password changes, and account deletion
+- Signup, login, server-invalidated logout, JWT protected routes, password changes, and account deletion
 - Profile management with name, academic focus, bio, timezone, last login, and profile picture upload/delete
 - Cloudinary-backed avatar storage with image validation, crop/resize processing, overwrite support, and old-avatar cleanup
 - AI chat threads, document chat, and generated artifacts
@@ -30,7 +44,8 @@ For the complete multi-project setup, start with the root `README.md`.
 - Flashcard review tracking
 - Single-frame and WebSocket focus/emotion analysis
 - Study sessions, distractions, emotion logs, goals, dashboard stats, analytics, and reports data
-- Achievements, user progress, manual unlock support, and achievement notifications
+- Dashboard bootstrap APIs for web and extension dashboards
+- Achievements, batched user progress calculation, manual unlock support, and achievement notifications
 - Notifications and read-state APIs
 - User settings for theme, Pomodoro timings, AI preferences, focus preferences, extension notifications, accessibility, privacy, and appearance
 - JSON/CSV export and account data clearing
@@ -39,21 +54,35 @@ For the complete multi-project setup, start with the root `README.md`.
 
 Create `.env` in `FocusSpark-Backend/`.
 
+Required for normal local startup:
+
 ```env
 DATABASE_URL=postgresql+psycopg2://postgres:password@127.0.0.1:5432/focusspark
 JWT_SECRET=your-32-character-secret-key-here
+```
 
+Required when using AI features:
+
+```env
 AI_PROVIDER=openai
 GITHUB_MODEL=gpt-4.1
 GITHUB_TOKEN=github_pat_xxxxx
 GITHUB_MODELS_ENDPOINT=https://models.inference.ai.azure.com
 AI_TEMPERATURE=0.7
 AI_MAX_TOKENS=1000
+```
 
+Required for profile-picture uploads:
+
+```env
 CLOUDINARY_CLOUD_NAME=your-cloud-name
 CLOUDINARY_API_KEY=your-api-key
 CLOUDINARY_API_SECRET=your-api-secret
+```
 
+Optional local configuration:
+
+```env
 CORS_ORIGINS=http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:5173
 LOG_LEVEL=INFO
 LOG_TO_FILE=true
@@ -93,6 +122,8 @@ venv\Scripts\activate
 pip install -r requirements.txt
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+Expected result: Uvicorn reports that it is running on `http://127.0.0.1:8000`, and the health check below returns the FocusSpark backend message.
 
 Before running locally without Docker, make sure PostgreSQL is running and the database in `DATABASE_URL` exists. With the sample value above, create a local database named `focusspark`.
 
@@ -205,7 +236,10 @@ Main auth/profile routes:
 - `PATCH /auth/profile`
 - `POST /auth/profile/avatar`
 - `DELETE /auth/profile/avatar`
+- `POST /auth/logout`
 - `DELETE /auth/delete-user`
+
+`POST /auth/logout` stores a hash of the current access token in `expired_tokens`. Future protected requests using that token are rejected even if the JWT has not reached its normal expiration time.
 
 Email verification and password-reset routes use short-lived OTP codes. If `SMTP_HOST` is not configured, the email service logs the message instead of sending it.
 
@@ -293,6 +327,8 @@ Stats:
 - `GET /study/stats/summary`
 - `GET /study/stats/analytics`
 - `GET /study/stats/dashboard`
+- `GET /study/dashboard/frontend`
+- `GET /study/dashboard/extension`
 
 Goals:
 
@@ -307,6 +343,8 @@ Achievements:
 - `GET /study/achievements`
 - `GET /study/achievements/unlocked`
 - `POST /study/achievements/{achievement_id}/unlock`
+
+Achievement progress is calculated with a shared per-request context so sessions and related counts are loaded once and reused across all achievement progress rows.
 
 Notifications:
 
@@ -433,5 +471,6 @@ python -m compileall app
 - Cloudinary is required for new profile-picture uploads.
 - Old local profile-picture paths are still cleaned up during avatar replacement/removal.
 - Achievement defaults are seeded on database initialization.
+- Dashboard bootstrap routes aggregate profile, settings, notification summary, dashboard stats, and surface-specific data for faster web/extension startup.
 - IDs are integer-based in the current SQLModel implementation.
 - `.env`, `.env.*`, logs, uploads, virtual environments, and cache folders should stay out of git.
