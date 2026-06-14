@@ -126,7 +126,7 @@ class UserSettings(SQLModel, table=True):
         sa_column=Column(JSON, nullable=True),
     )
     appearance: Optional[dict] = Field(
-        default=None,
+        default_factory=lambda: {"theme": "light"},
         sa_column=Column(JSON, nullable=True),
     )
     accessibility: Optional[dict] = Field(

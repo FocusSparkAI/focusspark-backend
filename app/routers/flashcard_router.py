@@ -32,22 +32,15 @@ def _get_ai_defaults(user_id: int, session: Session) -> tuple[str | None, str | 
     return settings.preferred_ai_provider, settings.preferred_ai_model
 
 
-class FlashcardReviewUpdate(BaseModel):
+class FlashcardDeckReviewItem(BaseModel):
+    flashcard_id: int
     known: bool
     correct_count: int = PydanticField(default=0, ge=0)
     incorrect_count: int = PydanticField(default=0, ge=0)
 
 
-def _get_owned_flashcard(flashcard_id: int, user_id: int, session: Session) -> Flashcard:
-    flashcard = session.get(Flashcard, flashcard_id)
-    if not flashcard:
-        raise HTTPException(status_code=404, detail="Flashcard not found")
-
-    deck = session.get(FlashcardDeck, flashcard.deck_id)
-    if not deck or deck.user_id != user_id:
-        raise HTTPException(status_code=404, detail="Flashcard not found")
-
-    return flashcard
+class FlashcardDeckReviewComplete(BaseModel):
+    reviews: list[FlashcardDeckReviewItem]
 
 
 @router.get("/")
@@ -55,9 +48,52 @@ def get_all_decks(
     session: Session = Depends(get_session),
     user=Depends(get_current_user)
 ):
-    return session.exec(
+    decks = session.exec(
         select(FlashcardDeck).where(FlashcardDeck.user_id == user.id)
     ).all()
+    if not decks:
+        return []
+
+    response = []
+    for deck in decks:
+        deck_data = deck.model_dump(mode="json")
+        flashcards = session.exec(
+            select(Flashcard).where(Flashcard.deck_id == deck.id)
+        ).all()
+        card_ids = [flashcard.id for flashcard in flashcards if flashcard.id is not None]
+        reviews = (
+            session.exec(
+                select(FlashcardReview).where(
+                    FlashcardReview.user_id == user.id,
+                    FlashcardReview.flashcard_id.in_(card_ids),
+                )
+            ).all()
+            if card_ids
+            else []
+        )
+
+        total_cards = deck.total_cards or len(flashcards)
+        total_correct = sum(review.correct_count for review in reviews)
+        total_incorrect = sum(review.incorrect_count for review in reviews)
+        total_attempts = total_correct + total_incorrect
+        latest_known = sum(1 for review in reviews if review.known)
+        reviewed_count = sum(1 for review in reviews if review.last_reviewed_at is not None)
+        last_reviewed = max(
+            (review.last_reviewed_at for review in reviews if review.last_reviewed_at is not None),
+            default=None,
+        )
+
+        deck_data.update(
+            {
+                "progress": round((latest_known / total_cards) * 100) if total_cards else 0,
+                "accuracy": round((total_correct / total_attempts) * 100) if total_attempts else 0,
+                "review_count": reviewed_count,
+                "last_reviewed": last_reviewed,
+            }
+        )
+        response.append(deck_data)
+
+    return response
 
 
 @router.get("/reviews")
@@ -156,46 +192,74 @@ def flashcards_from_chat(data: FlashcardFromChat,
         raise HTTPException(status_code=502, detail=f"AI provider error: {e}")
 
 
-@router.put("/{flashcard_id}/review")
-def upsert_flashcard_review(
-    flashcard_id: int,
-    payload: FlashcardReviewUpdate,
+@router.put("/{deck_id}/review-complete")
+def complete_flashcard_deck_review(
+    deck_id: int,
+    payload: FlashcardDeckReviewComplete,
     session: Session = Depends(get_session),
     user=Depends(get_current_user),
 ):
-    flashcard = _get_owned_flashcard(flashcard_id, user.id, session)
-    flashcard_pk = flashcard.id
-    if flashcard_pk is None:
-        raise HTTPException(status_code=500, detail="Flashcard is invalid")
-    review = session.exec(
-        select(FlashcardReview).where(
-            FlashcardReview.user_id == user.id,
-            FlashcardReview.flashcard_id == flashcard_pk,
+    deck = session.exec(
+        select(FlashcardDeck).where(
+            FlashcardDeck.id == deck_id,
+            FlashcardDeck.user_id == user.id,
         )
     ).first()
+    if not deck:
+        raise HTTPException(status_code=404, detail="Deck not found")
+
+    if not payload.reviews:
+        raise HTTPException(status_code=400, detail="No reviews submitted")
+
+    flashcards = session.exec(
+        select(Flashcard).where(Flashcard.deck_id == deck_id)
+    ).all()
+    owned_card_ids = {flashcard.id for flashcard in flashcards if flashcard.id is not None}
+
+    submitted_card_ids = [item.flashcard_id for item in payload.reviews]
+    if len(submitted_card_ids) != len(set(submitted_card_ids)):
+        raise HTTPException(status_code=400, detail="Duplicate flashcard reviews submitted")
+
+    if any(card_id not in owned_card_ids for card_id in submitted_card_ids):
+        raise HTTPException(status_code=400, detail="Review contains a card outside this deck")
+
+    existing_reviews = session.exec(
+        select(FlashcardReview).where(
+            FlashcardReview.user_id == user.id,
+            FlashcardReview.flashcard_id.in_(submitted_card_ids),
+        )
+    ).all()
+    reviews_by_card_id = {review.flashcard_id: review for review in existing_reviews}
 
     now = utc_now()
-    if review is None:
-        review = FlashcardReview(
-            user_id=user.id,
-            flashcard_id=flashcard_pk,
-        )
+    updated_reviews = []
+    for item in payload.reviews:
+        review = reviews_by_card_id.get(item.flashcard_id)
+        if review is None:
+            review = FlashcardReview(
+                user_id=user.id,
+                flashcard_id=item.flashcard_id,
+            )
 
-    review.known = payload.known
-    review.correct_count += payload.correct_count
-    review.incorrect_count += payload.incorrect_count
-    review.repetitions += 1
-    review.last_reviewed_at = now
+        review.known = item.known
+        review.correct_count += item.correct_count
+        review.incorrect_count += item.incorrect_count
+        review.repetitions += 1
+        review.last_reviewed_at = now
 
-    if payload.known:
-        review.review_interval_days = max(1, review.review_interval_days * 2)
-        review.ease_factor = min(3.0, review.ease_factor + 0.1)
-    else:
-        review.review_interval_days = 1
-        review.ease_factor = max(1.3, review.ease_factor - 0.2)
+        if item.known:
+            review.review_interval_days = max(1, review.review_interval_days * 2)
+            review.ease_factor = min(3.0, review.ease_factor + 0.1)
+        else:
+            review.review_interval_days = 1
+            review.ease_factor = max(1.3, review.ease_factor - 0.2)
 
-    review.next_review_at = now + timedelta(days=review.review_interval_days)
-    session.add(review)
+        review.next_review_at = now + timedelta(days=review.review_interval_days)
+        session.add(review)
+        updated_reviews.append(review)
+
     session.commit()
-    session.refresh(review)
-    return review.model_dump(mode="json")
+    for review in updated_reviews:
+        session.refresh(review)
+
+    return [review.model_dump(mode="json") for review in updated_reviews]

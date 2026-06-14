@@ -408,6 +408,18 @@ def remove_profile_avatar(session: Session = Depends(get_session), user=Depends(
 
     return _profile_response(user)
 
+
+@router.post("/logout")
+def logout(
+    token: str = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+    user=Depends(get_current_user),
+):
+    expire_access_token(token, user.id, session)
+    session.commit()
+    return {"message": "Logged out successfully"}
+
+
 @router.delete("/delete-user")
 def delete_user(
     token: str = Depends(oauth2_scheme),
