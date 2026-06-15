@@ -27,7 +27,7 @@ Expected result: Uvicorn reports that it is running on `http://127.0.0.1:8000`, 
 - PostgreSQL
 - JWT authentication with `python-jose`
 - Password hashing with Bcrypt / Passlib
-- OpenAI-compatible GitHub Models provider
+- OpenAI provider
 - Gemini provider
 - OpenCV, MediaPipe, Pillow, and DeepFace for focus/emotion and image handling
 - Cloudinary for hosted profile pictures
